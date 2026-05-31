@@ -245,3 +245,113 @@ button:disabled {
   word-break: break-all;
   border-top: 1px solid var(--border);
 }
+
+.field.small-2 {
+  max-width: 140px;
+}
+
+.custom-size {
+  max-width: 160px;
+  align-self: stretch;
+}
+
+/* image-to-image reference picker */
+.ref-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.ref-controls #i2i-url {
+  flex: 1;
+  min-width: 220px;
+}
+
+.filebtn {
+  display: inline-flex;
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.filebtn:hover {
+  background: #262b36;
+}
+
+.refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.refs:empty {
+  display: none;
+}
+
+.ref {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+.ref img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ref-rm {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.ref-rm:hover {
+  background: var(--err);
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 0;
+  flex-wrap: wrap;
+}
+
+.mini {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.mini:hover {
+  background: #262b36;
+  border-color: var(--accent);
+}

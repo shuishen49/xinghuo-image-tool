@@ -3,15 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
-// ---------- request payloads (sent from the frontend) ----------
+// ---------- request payload (sent from the frontend) ----------
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConnReq {
-    base_url: String,
-    api_key: String,
-}
-
+/// Mirrors the OpenAI-compatible `ImageGenerationsRequest`.
+/// Image-to-image is the same call with a non-empty `image` array.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GenReq {
@@ -21,19 +16,17 @@ struct GenReq {
     prompt: String,
     #[serde(default)]
     size: Option<String>,
+    /// reference images for image-to-image: http(s) URLs or `data:` URIs
     #[serde(default)]
-    n: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EditReq {
-    base_url: String,
-    api_key: String,
-    model: String,
-    prompt: String,
-    /// source image as a data URI: `data:image/png;base64,....`
-    image: String,
+    image: Vec<String>,
+    #[serde(default)]
+    timeout_sec: Option<u32>,
+    /// optional debug: debug_account_tier (free | plus | think)
+    #[serde(default)]
+    account_tier: Option<String>,
+    /// optional debug: debug_chatgpt_token
+    #[serde(default)]
+    debug_token: Option<String>,
 }
 
 // ---------- response sent back to the frontend ----------
@@ -45,6 +38,8 @@ struct ImageOut {
     mime: String,
     /// absolute path the image was saved to on disk
     saved_path: String,
+    /// original remote URL the API returned (when available)
+    source_url: Option<String>,
 }
 
 // ---------- helpers ----------
@@ -57,9 +52,9 @@ fn normalize_base(base: &str) -> String {
     b
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
+fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))
 }
@@ -82,32 +77,45 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// Scan free-form text for http(s) URLs and `data:image/...` URIs.
-fn extract_urls(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut chars = s.char_indices().peekable();
-    while let Some((i, _)) = chars.next() {
-        let rest = &s[i..];
-        if rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("data:image/") {
-            let end = rest
-                .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | '<' | '>' | '`'))
-                .unwrap_or(rest.len());
-            out.push(rest[..end].to_string());
-            // skip the chars we just consumed
-            let target = i + end;
-            while let Some(&(j, _)) = chars.peek() {
-                if j < target {
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-    out
+/// Heuristic: a long string made only of base64 characters (no scheme).
+fn looks_like_base64(s: &str) -> bool {
+    let s = s.trim();
+    s.len() > 100
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
 }
 
-/// Resolve an image source (http(s) URL or data URI) to raw bytes + mime.
+/// Pull a user-readable message out of an error response body.
+/// The spec prefers `message` (model/upstream text) over `error` (program reason).
+fn error_message(status: reqwest::StatusCode, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let msg = v["message"].as_str().filter(|s| !s.is_empty());
+        let err = v["error"].as_str().filter(|s| !s.is_empty());
+        // nested OpenAI-style { "error": { "message": "..." } }
+        let nested = v["error"]["message"].as_str().filter(|s| !s.is_empty());
+        if let Some(m) = msg.or(nested).or(err) {
+            return m.to_string();
+        }
+    }
+    format!("接口返回 {}: {}", status.as_u16(), truncate(body, 300))
+}
+
+/// Resolve an image source returned by the API or supplied as a reference.
+/// May be an http(s) URL, a `data:` URI, or (defensively) raw base64.
+async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
+    if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
+        src_to_bytes(c, src).await
+    } else if looks_like_base64(src) {
+        let bytes = B64
+            .decode(src.trim())
+            .map_err(|e| format!("base64 解码失败: {e}"))?;
+        Ok((bytes, "image/png".to_string()))
+    } else {
+        Err(format!("无法识别的图片来源: {}", truncate(src, 80)))
+    }
+}
+
+/// Resolve an http(s) URL or `data:` URI to raw bytes + mime.
 async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
     if let Some(rest) = src.strip_prefix("data:") {
         let (meta, data) = rest.split_once(',').ok_or("无效的 data URI")?;
@@ -167,60 +175,52 @@ fn to_out(
     mime: String,
     tag: &str,
     idx: usize,
+    source_url: Option<String>,
 ) -> Result<ImageOut, String> {
     let saved_path = save_image(app, &bytes, &mime, tag, idx)?;
     Ok(ImageOut {
         b64: B64.encode(&bytes),
         mime,
         saved_path,
+        source_url,
     })
 }
 
-// ---------- commands ----------
+// ---------- command ----------
 
-/// GET /v1/models — also doubles as a "test connection" check.
+/// POST {base}/v1/images/generations (OpenAI-compatible).
+/// Text-to-image when `image` is empty; image-to-image when it has reference URLs.
 #[tauri::command]
-async fn list_models(req: ConnReq) -> Result<Vec<String>, String> {
-    let base = normalize_base(&req.base_url);
-    let c = http_client()?;
-    let resp = c
-        .get(format!("{base}/v1/models"))
-        .bearer_auth(&req.api_key)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("接口返回 {status}: {}", truncate(&text, 300)));
+async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<ImageOut>, String> {
+    if req.prompt.trim().is_empty() {
+        return Err("prompt 不能为空".into());
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {e}"))?;
-    let mut ids: Vec<String> = v["data"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    ids.sort();
-    Ok(ids)
-}
-
-/// POST /v1/images/generations (text → image, OpenAI-compatible).
-#[tauri::command]
-async fn generate_image(app: tauri::AppHandle, req: GenReq) -> Result<Vec<ImageOut>, String> {
     let base = normalize_base(&req.base_url);
-    let c = http_client()?;
+    // server waits up to timeout_sec; give the client a margin on top.
+    let timeout_sec = req.timeout_sec.unwrap_or(300).clamp(10, 1800);
+    let c = http_client(timeout_sec as u64 + 60)?;
+
+    // Only fields allowed by the schema (additionalProperties: false).
     let mut body = serde_json::json!({
         "model": req.model,
         "prompt": req.prompt,
-        "n": req.n.unwrap_or(1),
     });
     if let Some(size) = req.size.as_ref().filter(|s| !s.is_empty()) {
         body["size"] = serde_json::json!(size);
     }
+    let refs: Vec<&String> = req.image.iter().filter(|s| !s.trim().is_empty()).collect();
+    let is_i2i = !refs.is_empty();
+    if is_i2i {
+        body["image"] = serde_json::json!(refs);
+    }
+    body["timeout_sec"] = serde_json::json!(timeout_sec);
+    if let Some(tier) = req.account_tier.as_ref().filter(|s| !s.is_empty()) {
+        body["debug_account_tier"] = serde_json::json!(tier);
+    }
+    if let Some(tok) = req.debug_token.as_ref().filter(|s| !s.is_empty()) {
+        body["debug_chatgpt_token"] = serde_json::json!(tok);
+    }
+
     let resp = c
         .post(format!("{base}/v1/images/generations"))
         .bearer_auth(&req.api_key)
@@ -231,110 +231,42 @@ async fn generate_image(app: tauri::AppHandle, req: GenReq) -> Result<Vec<ImageO
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
     if !status.is_success() {
-        return Err(format!("接口返回 {status}: {}", truncate(&text, 400)));
+        return Err(error_message(status, &text));
     }
+
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {e}"))?;
     let data = v["data"]
         .as_array()
         .ok_or_else(|| format!("响应缺少 data 数组: {}", truncate(&text, 300)))?;
+
+    let tag = if is_i2i { "img2img" } else { "txt2img" };
     let mut outs = Vec::new();
+    let mut last_err = String::new();
     for (i, item) in data.iter().enumerate() {
-        let (bytes, mime) = if let Some(b64) = item["b64_json"].as_str() {
-            (
-                B64.decode(b64.trim())
-                    .map_err(|e| format!("base64 解码失败: {e}"))?,
-                "image/png".to_string(),
-            )
-        } else if let Some(url) = item["url"].as_str() {
-            src_to_bytes(&c, url).await?
-        } else {
+        // Per spec both `url` and `b64_json` hold the image URL; prefer `url`.
+        let Some(src) = item["url"]
+            .as_str()
+            .or_else(|| item["b64_json"].as_str())
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
-        outs.push(to_out(&app, bytes, mime, "txt2img", i)?);
-    }
-    if outs.is_empty() {
-        return Err(format!("未从响应中解析到图片: {}", truncate(&text, 300)));
-    }
-    Ok(outs)
-}
-
-/// Image → image. The gateway has no /v1/images/edits, so we use the
-/// multimodal /v1/chat/completions shape (image-capable model returns an image).
-#[tauri::command]
-async fn edit_image(app: tauri::AppHandle, req: EditReq) -> Result<Vec<ImageOut>, String> {
-    let base = normalize_base(&req.base_url);
-    let c = http_client()?;
-    let body = serde_json::json!({
-        "model": req.model,
-        "stream": false,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": req.prompt},
-                {"type": "image_url", "image_url": {"url": req.image}}
-            ]
-        }]
-    });
-    let resp = c
-        .post(format!("{base}/v1/chat/completions"))
-        .bearer_auth(&req.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("接口返回 {status}: {}", truncate(&text, 400)));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {e}"))?;
-    let msg = &v["choices"][0]["message"];
-
-    let mut srcs: Vec<String> = Vec::new();
-    // some gateways return images under message.images[]
-    if let Some(imgs) = msg["images"].as_array() {
-        for im in imgs {
-            if let Some(u) = im["url"].as_str() {
-                srcs.push(u.to_string());
-            } else if let Some(u) = im["image_url"]["url"].as_str() {
-                srcs.push(u.to_string());
-            } else if let Some(u) = im.as_str() {
-                srcs.push(u.to_string());
+        match resolve_src(&c, src).await {
+            Ok((bytes, mime)) => {
+                let source_url = src.starts_with("http").then(|| src.to_string());
+                outs.push(to_out(&app, bytes, mime, tag, i, source_url)?);
             }
-        }
-    }
-    // content may be a plain string or an array of parts
-    match &msg["content"] {
-        serde_json::Value::String(s) => srcs.extend(extract_urls(s)),
-        serde_json::Value::Array(arr) => {
-            for it in arr {
-                if let Some(u) = it["image_url"]["url"].as_str() {
-                    srcs.push(u.to_string());
-                } else if let Some(s) = it["text"].as_str() {
-                    srcs.extend(extract_urls(s));
-                }
-            }
-        }
-        _ => {}
-    }
-    srcs.dedup();
-
-    if srcs.is_empty() {
-        let content_text = msg["content"].as_str().unwrap_or("");
-        let shown = if content_text.is_empty() { &text } else { content_text };
-        return Err(format!("未返回图片。模型回复：{}", truncate(shown, 400)));
-    }
-
-    let mut outs = Vec::new();
-    for (i, src) in srcs.iter().enumerate() {
-        if let Ok((bytes, mime)) = src_to_bytes(&c, src).await {
-            outs.push(to_out(&app, bytes, mime, "img2img", i)?);
+            Err(e) => last_err = e,
         }
     }
     if outs.is_empty() {
-        return Err("解析到图片链接但下载失败".to_string());
+        let detail = if last_err.is_empty() {
+            truncate(&text, 300)
+        } else {
+            last_err
+        };
+        return Err(format!("未从响应中获取到图片: {detail}"));
     }
     Ok(outs)
 }
@@ -352,11 +284,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            list_models,
-            generate_image,
-            edit_image
-        ])
+        .invoke_handler(tauri::generate_handler![generate_images])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
