@@ -1,7 +1,11 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
+
+/// Monotonic counter so concurrent tasks never collide on a filename.
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------- request payload (sent from the frontend) ----------
 
@@ -164,7 +168,8 @@ fn save_image(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = dir.join(format!("{tag}-{ts}-{idx}.{}", ext_for(mime)));
+    let seq = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("{tag}-{ts}-{seq}-{idx}.{}", ext_for(mime)));
     std::fs::write(&path, bytes).map_err(|e| format!("写入文件失败: {e}"))?;
     Ok(path.to_string_lossy().to_string())
 }

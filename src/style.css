@@ -355,3 +355,131 @@ button:disabled {
   background: #262b36;
   border-color: var(--accent);
 }
+
+/* tab badge */
+.tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+/* task queue */
+.tasks-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tasklist {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task.error {
+  border-color: #5a2a2a;
+}
+
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge.running {
+  background: var(--accent);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+.badge.done {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #07260f;
+}
+
+.badge.error {
+  background: var(--err);
+  border-color: var(--err);
+  color: #2a0606;
+}
+
+.task-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.task-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.task-prompt {
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.task-body.busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.task-body.err {
+  font-size: 13px;
+  color: var(--err);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
