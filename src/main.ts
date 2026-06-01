@@ -17,6 +17,7 @@ interface Settings {
   accountTier: string;
   debugToken: string;
   maxConcurrent: number;
+  uploadUrl: string;
 }
 interface RefImg {
   value: string; // http(s) URL or data: URI
@@ -51,6 +52,7 @@ const SIZE_PATTERN = /^[0-9]{2,5}x[0-9]{2,5}$/;
 // ---------- settings persistence ----------
 const STORE_KEY = "xinghuo_settings";
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
+const DEFAULT_UPLOAD = "https://imageproxy.zhongzhuan.chat/api/upload";
 
 function loadSettings(): Settings {
   const d: Settings = {
@@ -62,6 +64,7 @@ function loadSettings(): Settings {
     accountTier: "",
     debugToken: "",
     maxConcurrent: 3,
+    uploadUrl: DEFAULT_UPLOAD,
   };
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -76,6 +79,7 @@ function loadSettings(): Settings {
         accountTier: s.accountTier ?? d.accountTier,
         debugToken: s.debugToken ?? d.debugToken,
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
+        uploadUrl: s.uploadUrl ?? d.uploadUrl,
       };
     }
   } catch {
@@ -153,7 +157,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <input id="i2i-url" type="text" placeholder="或粘贴图片链接 https://…" />
           <button id="i2i-add-url">添加链接</button>
         </div>
-        <p class="ref-hint">提示：在本页直接按 <code>Ctrl/⌘ + V</code> 即可把剪贴板里的图片加为参考图。</p>
+        <p class="ref-hint">提示：在本页直接按 <code>Ctrl/⌘ + V</code> 即可把剪贴板里的图片加为参考图；上传/粘贴的本地图片会先自动上传到图床再生成。</p>
         <div class="refs" id="i2i-refs"></div>
       </div>
       <label class="field">
@@ -193,6 +197,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <label class="field">
         <span>API Key（Bearer Token）</span>
         <input id="set-key" type="password" placeholder="sk-..." />
+      </label>
+      <label class="field">
+        <span>图片上传地址 (Upload URL，本地图片图生图时自动上传到此)</span>
+        <input id="set-upload" type="text" placeholder="${DEFAULT_UPLOAD}" />
       </label>
       <div class="row">
         <label class="field small-2">
@@ -465,6 +473,7 @@ function buildReq(t: Task) {
     timeoutSec: settings.timeoutSec,
     accountTier: settings.accountTier || undefined,
     debugToken: settings.debugToken || undefined,
+    uploadUrl: settings.uploadUrl || undefined,
   };
 }
 
@@ -546,12 +555,14 @@ const timeoutInput = byId<HTMLInputElement>("set-timeout");
 const concurrencyInput = byId<HTMLInputElement>("set-concurrency");
 const tierSelect = byId<HTMLSelectElement>("set-tier");
 const debugTokenInput = byId<HTMLInputElement>("set-debug-token");
+const uploadInput = byId<HTMLInputElement>("set-upload");
 baseInput.value = settings.baseUrl;
 keyInput.value = settings.apiKey;
 timeoutInput.value = String(settings.timeoutSec);
 concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
 debugTokenInput.value = settings.debugToken;
+uploadInput.value = settings.uploadUrl;
 
 byId<HTMLButtonElement>("btn-save").addEventListener("click", () => {
   const t = parseInt(timeoutInput.value, 10);
@@ -564,6 +575,7 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", () => {
     maxConcurrent: Number.isFinite(c) ? Math.min(16, Math.max(1, c)) : 3,
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
+    uploadUrl: uploadInput.value.trim() || DEFAULT_UPLOAD,
   };
   timeoutInput.value = String(settings.timeoutSec);
   concurrencyInput.value = String(settings.maxConcurrent);
