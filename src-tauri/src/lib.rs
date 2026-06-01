@@ -7,6 +7,11 @@ use tauri::Manager;
 /// Monotonic counter so concurrent tasks never collide on a filename.
 static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Default image host. Local reference images (`data:` URIs / raw base64) are
+/// uploaded here to obtain a public URL the generation API can fetch.
+/// Overridable per request via `GenReq::upload_url`.
+const DEFAULT_UPLOAD_URL: &str = "https://imageproxy.zhongzhuan.chat/api/upload";
+
 // ---------- request payload (sent from the frontend) ----------
 
 /// Mirrors the OpenAI-compatible `ImageGenerationsRequest`.
@@ -31,6 +36,9 @@ struct GenReq {
     /// optional debug: debug_chatgpt_token
     #[serde(default)]
     debug_token: Option<String>,
+    /// override for the image-upload endpoint; empty/None -> DEFAULT_UPLOAD_URL
+    #[serde(default)]
+    upload_url: Option<String>,
 }
 
 // ---------- response sent back to the frontend ----------
@@ -149,6 +157,66 @@ async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String
     }
 }
 
+/// Pull a public URL out of the image-host upload response.
+/// Mirrors the host's shapes: `url` | `data.url` | `result.url` | `file.url`.
+fn extract_uploaded_url(v: &serde_json::Value) -> Option<String> {
+    let pick = |s: Option<&str>| s.filter(|x| !x.is_empty()).map(str::to_string);
+    pick(v["url"].as_str())
+        .or_else(|| pick(v["data"]["url"].as_str()))
+        .or_else(|| pick(v["result"]["url"].as_str()))
+        .or_else(|| pick(v["file"]["url"].as_str()))
+}
+
+/// Upload raw image bytes to the host (multipart `file` field, Bearer auth)
+/// and return the public http(s) URL it responds with.
+async fn upload_image(
+    c: &reqwest::Client,
+    upload_url: &str,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> Result<String, String> {
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(format!("ref.{}", ext_for(mime)))
+        .mime_str(mime)
+        .map_err(|e| format!("构造上传数据失败: {e}"))?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+    // The image host accepts anonymous uploads — do NOT forward the generation
+    // API key to this third-party host.
+    let resp = c
+        .post(upload_url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("上传图片失败: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取上传响应失败: {e}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "上传图片失败 {}: {}",
+            status.as_u16(),
+            truncate(&text, 300)
+        ));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析上传响应失败: {e}"))?;
+    extract_uploaded_url(&v)
+        .ok_or_else(|| format!("上传响应里找不到图片地址: {}", truncate(&text, 300)))
+}
+
+/// Turn a reference image into an http(s) URL the generation API can fetch.
+/// http(s) URLs pass through; `data:` URIs / raw base64 are uploaded first.
+async fn ref_to_url(c: &reqwest::Client, upload_url: &str, src: &str) -> Result<String, String> {
+    let s = src.trim();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return Ok(s.to_string());
+    }
+    let (bytes, mime) = resolve_src(c, s).await?;
+    upload_image(c, upload_url, bytes, &mime).await
+}
+
 /// Save bytes under <Pictures>/xinghuo-image-tool/ and return the absolute path.
 fn save_image(
     app: &tauri::AppHandle,
@@ -213,10 +281,23 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     if let Some(size) = req.size.as_ref().filter(|s| !s.is_empty()) {
         body["size"] = serde_json::json!(size);
     }
-    let refs: Vec<&String> = req.image.iter().filter(|s| !s.trim().is_empty()).collect();
-    let is_i2i = !refs.is_empty();
+    let raw_refs: Vec<&String> = req.image.iter().filter(|s| !s.trim().is_empty()).collect();
+    let is_i2i = !raw_refs.is_empty();
     if is_i2i {
-        body["image"] = serde_json::json!(refs);
+        // The generation API only fetches http(s) URLs, so any local image
+        // (an uploaded file or pasted clipboard image arrives as a `data:` URI)
+        // is uploaded to the image host first to obtain a public URL.
+        let upload_url = req
+            .upload_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_UPLOAD_URL);
+        let mut ref_urls: Vec<String> = Vec::with_capacity(raw_refs.len());
+        for src in &raw_refs {
+            ref_urls.push(ref_to_url(&c, upload_url, src).await?);
+        }
+        body["image"] = serde_json::json!(ref_urls);
     }
     body["timeout_sec"] = serde_json::json!(timeout_sec);
     if let Some(tier) = req.account_tier.as_ref().filter(|s| !s.is_empty()) {
