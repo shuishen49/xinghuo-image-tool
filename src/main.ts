@@ -149,9 +149,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             添加图片文件
             <input id="i2i-file" type="file" accept="image/*" multiple hidden />
           </label>
+          <button id="i2i-paste">📋 粘贴剪贴板图片</button>
           <input id="i2i-url" type="text" placeholder="或粘贴图片链接 https://…" />
           <button id="i2i-add-url">添加链接</button>
         </div>
+        <p class="ref-hint">提示：在本页直接按 <code>Ctrl/⌘ + V</code> 即可把剪贴板里的图片加为参考图。</p>
         <div class="refs" id="i2i-refs"></div>
       </div>
       <label class="field">
@@ -611,17 +613,25 @@ function renderRefs(): void {
   });
 }
 
+/** Read a Blob/File into a data: URI and add it as a reference image. */
+function addRefFromBlob(blob: Blob, label: string): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    refImgs.push({ value: String(reader.result), label });
+    renderRefs();
+  };
+  reader.readAsDataURL(blob);
+}
+
+/** A friendly file extension for an image MIME type, e.g. "image/png" -> "png". */
+function imageExt(mime: string): string {
+  return (mime.split("/")[1] || "png").split(/[;+]/)[0] || "png";
+}
+
 byId<HTMLInputElement>("i2i-file").addEventListener("change", (ev) => {
   const files = (ev.target as HTMLInputElement).files;
   if (!files) return;
-  for (const file of Array.from(files)) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      refImgs.push({ value: String(reader.result), label: file.name });
-      renderRefs();
-    };
-    reader.readAsDataURL(file);
-  }
+  for (const file of Array.from(files)) addRefFromBlob(file, file.name);
   (ev.target as HTMLInputElement).value = "";
 });
 
@@ -632,6 +642,65 @@ byId<HTMLButtonElement>("i2i-add-url").addEventListener("click", () => {
   refImgs.push({ value: url, label: url });
   input.value = "";
   renderRefs();
+});
+
+// ----- paste clipboard images straight into the reference list -----
+
+/** Add every image carried by a paste/drop transfer; returns how many landed. */
+function addRefsFromTransfer(dt: DataTransfer | null): number {
+  if (!dt) return 0;
+  let n = 0;
+  for (const item of Array.from(dt.items)) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) {
+        addRefFromBlob(file, file.name || `剪贴板图片.${imageExt(file.type)}`);
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+// Ctrl/⌘+V anywhere on the 图生图 tab pastes clipboard images in. Plain-text
+// pastes carry no image items, so the URL / prompt fields keep working normally.
+document.addEventListener("paste", (ev) => {
+  const panel = document.getElementById("panel-i2i");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const n = addRefsFromTransfer(ev.clipboardData);
+  if (n > 0) {
+    ev.preventDefault();
+    setStatus("i2i-status", `已从剪贴板粘贴 ${n} 张参考图 ✓`, "ok");
+  }
+});
+
+// The button reads the clipboard on click via the async API, falling back to the
+// keyboard hint on webviews that don't allow programmatic clipboard reads.
+byId<HTMLButtonElement>("i2i-paste").addEventListener("click", async () => {
+  const read = navigator.clipboard?.read?.bind(navigator.clipboard);
+  if (read) {
+    try {
+      let n = 0;
+      for (const item of await read()) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (type) {
+          addRefFromBlob(await item.getType(type), `剪贴板图片.${imageExt(type)}`);
+          n++;
+        }
+      }
+      setStatus(
+        "i2i-status",
+        n > 0
+          ? `已从剪贴板粘贴 ${n} 张参考图 ✓`
+          : "剪贴板里没有图片；复制一张图后再点，或直接按 Ctrl/⌘+V。",
+        n > 0 ? "ok" : "info",
+      );
+      return;
+    } catch {
+      /* not permitted in this webview — fall through to the hint */
+    }
+  }
+  setStatus("i2i-status", "此环境不支持按钮读取剪贴板，请直接按 Ctrl/⌘+V 粘贴图片。", "info");
 });
 
 byId<HTMLButtonElement>("i2i-go").addEventListener("click", () => {
