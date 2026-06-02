@@ -65,8 +65,29 @@ fn normalize_base(base: &str) -> String {
 }
 
 fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    // NOTE: do NOT set .tcp_keepalive() here. Image generation keeps the
+    // connection silent for several minutes; on some network paths a stateful
+    // firewall/NAT drops the keepalive probe packets, so enabling keepalive
+    // actually causes the OS to declare the connection dead at ~120s
+    // ("connection closed before message completed"). curl (no keepalive)
+    // survives the same request for 200s+, so we mirror that: just a timeout.
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
+        // Use rustls so ALPN reliably negotiates HTTP/2. Windows' native SChannel
+        // often falls back to HTTP/1.1, and this Envoy gateway appears to cut
+        // idle HTTP/1.1 connections at ~120s (curl over HTTP/2 survives 200s+).
+        .use_rustls_tls()
+        // The gateway closes a connection that carries no data for ~120s. Image
+        // generation keeps the connection silent for minutes while the server
+        // renders, so we send HTTP/2 PING frames as an application-level
+        // heartbeat. Unlike TCP keepalive (plaintext probes that firewalls drop)
+        // these PINGs travel *inside* TLS, so the gateway sees them and keeps
+        // resetting its idle timer — this is why curl over HTTP/2 survives.
+        .http2_keep_alive_interval(std::time::Duration::from_secs(20))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(20))
+        .http2_keep_alive_while_idle(true)
+        // Don't reuse a long-lived pooled connection across parallel requests.
+        .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))
 }
@@ -307,15 +328,68 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
         body["debug_chatgpt_token"] = serde_json::json!(tok);
     }
 
-    let resp = c
-        .post(format!("{base}/v1/images/generations"))
+    // Single attempt (no retry). We time it so we can tell *where* it dies:
+    // a consistent elapsed value points at a gateway/LB timeout closing the
+    // connection; near-instant means the connection never really opened.
+    let url = format!("{base}/v1/images/generations");
+    let started = std::time::Instant::now();
+    let send_result = c
+        .post(&url)
         .bearer_auth(&req.api_key)
         .json(&body)
         .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
+        .await;
+    let elapsed = started.elapsed();
+    let resp = match send_result {
+        Ok(resp) => {
+            eprintln!(
+                "[generate_images] 收到响应头: {} {:?} (耗时 {:.1}s)",
+                resp.status(),
+                resp.version(),
+                elapsed.as_secs_f64()
+            );
+            resp
+        }
+        Err(e) => {
+            // Full source chain for a readable, actionable message.
+            let mut detail = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(s) = src {
+                detail.push_str(&format!("\n  ↳ {s}"));
+                src = s.source();
+            }
+            eprintln!(
+                "[generate_images] send 失败,耗时 {:.1}s — 服务器在返回任何响应头之前就关闭了连接(没有可打印的返回值)。",
+                elapsed.as_secs_f64()
+            );
+            eprintln!("[generate_images] {e:#?}");
+            return Err(format!(
+                "请求失败(等待 {:.0}s 后连接被关闭,服务器未返回任何数据): {detail}",
+                elapsed.as_secs_f64()
+            ));
+        }
+    };
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    // Stream the body so a partial/truncated payload is still logged before we
+    // error out — this is the only place a "return value" could exist.
+    let text = match resp.text().await {
+        Ok(text) => {
+            eprintln!(
+                "[generate_images] 响应体读取完成: {} 字节,总耗时 {:.1}s\n[generate_images] 返回内容: {}",
+                text.len(),
+                started.elapsed().as_secs_f64(),
+                truncate(&text, 1200)
+            );
+            text
+        }
+        Err(e) => {
+            eprintln!(
+                "[generate_images] 读取响应体失败,总耗时 {:.1}s: {e:#?}",
+                started.elapsed().as_secs_f64()
+            );
+            return Err(format!("读取响应失败: {e}"));
+        }
+    };
     if !status.is_success() {
         return Err(error_message(status, &text));
     }

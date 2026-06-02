@@ -51,7 +51,7 @@ const SIZE_PATTERN = /^[0-9]{2,5}x[0-9]{2,5}$/;
 
 // ---------- settings persistence ----------
 const STORE_KEY = "xinghuo_settings";
-const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
+const DEFAULT_BASE = "https://kpymcldcmzig.sealosgzg.site";
 const DEFAULT_UPLOAD = "https://imageproxy.zhongzhuan.chat/api/upload";
 
 function loadSettings(): Settings {
@@ -60,7 +60,7 @@ function loadSettings(): Settings {
     apiKey: "",
     model: MODELS[0].value,
     size: SIZES[0].value,
-    timeoutSec: 300,
+    timeoutSec: 600,
     accountTier: "",
     debugToken: "",
     maxConcurrent: 3,
@@ -70,7 +70,7 @@ function loadSettings(): Settings {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
       const s = JSON.parse(raw) as Partial<Settings>;
-      return {
+      const loaded: Settings = {
         baseUrl: s.baseUrl ?? d.baseUrl,
         apiKey: s.apiKey ?? d.apiKey,
         model: s.model ?? d.model,
@@ -81,6 +81,27 @@ function loadSettings(): Settings {
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
         uploadUrl: s.uploadUrl ?? d.uploadUrl,
       };
+
+      // --- one-time migration of stale saved settings ---
+      // The old gateway `uuerqapsftez` hard-closes any request at 120s, which
+      // breaks slow (multi-minute) image generation. Production is the
+      // `kpymcldcmzig` gateway, which allows long requests. Move users off the
+      // broken host automatically.
+      const STALE_BASES = ["https://uuerqapsftez.sealosgzg.site"];
+      let migrated = false;
+      if (STALE_BASES.includes(loaded.baseUrl)) {
+        loaded.baseUrl = DEFAULT_BASE;
+        migrated = true;
+      }
+      // Image generation needs a generous wait; bump anything below 600s.
+      if (!loaded.timeoutSec || loaded.timeoutSec < 600) {
+        loaded.timeoutSec = 600;
+        migrated = true;
+      }
+      if (migrated) {
+        saveSettings(loaded);
+      }
+      return loaded;
     }
   } catch {
     /* ignore corrupt storage */
@@ -139,6 +160,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <select id="t2i-size">${sizeOptions(settings.size)}</select>
         </label>
         <input class="custom-size hidden" id="t2i-size-custom" type="text" placeholder="如 1024x1536" />
+        <label class="field">
+          <span>出图张数</span>
+          <input id="t2i-count" type="number" min="1" max="4" value="1" />
+        </label>
         <button class="primary" id="t2i-go">生成</button>
       </div>
       <div class="status" id="t2i-status"></div>
@@ -174,6 +199,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <select id="i2i-size">${sizeOptions(settings.size)}</select>
         </label>
         <input class="custom-size hidden" id="i2i-size-custom" type="text" placeholder="如 1024x1536" />
+        <label class="field">
+          <span>出图张数</span>
+          <input id="i2i-count" type="number" min="1" max="4" value="1" />
+        </label>
         <button class="primary" id="i2i-go">生成</button>
       </div>
       <div class="status" id="i2i-status"></div>
@@ -542,8 +571,16 @@ byId<HTMLButtonElement>("btn-clear-done").addEventListener("click", () => {
   renderTasks();
 });
 
-function submittedNote(): string {
-  return `已加入任务 ✓（生成中 ${running}，排队 ${queue.length}）— 切到「任务」查看结果`;
+function submittedNote(n = 1): string {
+  const prefix = n > 1 ? `已加入 ${n} 个任务 ✓` : "已加入任务 ✓";
+  return `${prefix}（生成中 ${running}，排队 ${queue.length}）— 切到「任务」查看结果`;
+}
+
+/** Read the "出图张数" input (1-4). The API returns one image per request,
+ *  so N images = N enqueued tasks, run via the existing concurrency queue. */
+function readCount(id: string): number {
+  const v = parseInt(byId<HTMLInputElement>(id).value, 10);
+  return Number.isFinite(v) ? Math.min(4, Math.max(1, v)) : 1;
 }
 
 renderTasks();
@@ -571,7 +608,7 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", () => {
     ...settings,
     baseUrl: baseInput.value.trim() || DEFAULT_BASE,
     apiKey: keyInput.value.trim(),
-    timeoutSec: Number.isFinite(t) ? Math.min(1800, Math.max(10, t)) : 300,
+    timeoutSec: Number.isFinite(t) ? Math.min(1800, Math.max(10, t)) : 600,
     maxConcurrent: Number.isFinite(c) ? Math.min(16, Math.max(1, c)) : 3,
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
@@ -595,8 +632,9 @@ byId<HTMLButtonElement>("t2i-go").addEventListener("click", () => {
   const model = byId<HTMLSelectElement>("t2i-model").value;
   settings = { ...settings, model, size: size ?? settings.size };
   saveSettings(settings);
-  enqueue("t2i", model, size, prompt, []);
-  setStatus("t2i-status", submittedNote(), "ok");
+  const count = readCount("t2i-count");
+  for (let i = 0; i < count; i++) enqueue("t2i", model, size, prompt, []);
+  setStatus("t2i-status", submittedNote(count), "ok");
 });
 
 // ---------- 图生图 ----------
@@ -725,6 +763,8 @@ byId<HTMLButtonElement>("i2i-go").addEventListener("click", () => {
   const model = byId<HTMLSelectElement>("i2i-model").value;
   settings = { ...settings, model, size: size ?? settings.size };
   saveSettings(settings);
-  enqueue("i2i", model, size, prompt, refImgs.map((r) => r.value));
-  setStatus("i2i-status", submittedNote(), "ok");
+  const count = readCount("i2i-count");
+  const refs = refImgs.map((r) => r.value);
+  for (let i = 0; i < count; i++) enqueue("i2i", model, size, prompt, refs);
+  setStatus("i2i-status", submittedNote(count), "ok");
 });
