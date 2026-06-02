@@ -51,8 +51,9 @@ const SIZE_PATTERN = /^[0-9]{2,5}x[0-9]{2,5}$/;
 
 // ---------- settings persistence ----------
 const STORE_KEY = "xinghuo_settings";
-const DEFAULT_BASE = "https://kpymcldcmzig.sealosgzg.site";
-const DEFAULT_UPLOAD = "https://imageproxy.zhongzhuan.chat/api/upload";
+const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
+// Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
+const DEFAULT_UPLOAD = "";
 
 function loadSettings(): Settings {
   const d: Settings = {
@@ -83,19 +84,16 @@ function loadSettings(): Settings {
       };
 
       // --- one-time migration of stale saved settings ---
-      // The old gateway `uuerqapsftez` hard-closes any request at 120s, which
-      // breaks slow (multi-minute) image generation. Production is the
-      // `kpymcldcmzig` gateway, which allows long requests. Move users off the
-      // broken host automatically.
-      const STALE_BASES = ["https://uuerqapsftez.sealosgzg.site"];
       let migrated = false;
-      if (STALE_BASES.includes(loaded.baseUrl)) {
-        loaded.baseUrl = DEFAULT_BASE;
-        migrated = true;
-      }
       // Image generation needs a generous wait; bump anything below 600s.
       if (!loaded.timeoutSec || loaded.timeoutSec < 600) {
         loaded.timeoutSec = 600;
+        migrated = true;
+      }
+      // The public image host (imageproxy) is unreliable. Clear it so uploads
+      // fall back to the platform's own OSS endpoint (derived from base URL).
+      if (loaded.uploadUrl.includes("imageproxy.zhongzhuan.chat")) {
+        loaded.uploadUrl = "";
         migrated = true;
       }
       if (migrated) {
@@ -228,8 +226,8 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <input id="set-key" type="password" placeholder="sk-..." />
       </label>
       <label class="field">
-        <span>图片上传地址 (Upload URL，本地图片图生图时自动上传到此)</span>
-        <input id="set-upload" type="text" placeholder="${DEFAULT_UPLOAD}" />
+        <span>图片上传地址 (Upload URL，留空＝用平台自带 OSS，推荐)</span>
+        <input id="set-upload" type="text" placeholder="留空即用平台 OSS：{接口地址}/api/v1/uploads/upload?public=true" />
       </label>
       <div class="row">
         <label class="field small-2">

@@ -7,10 +7,9 @@ use tauri::Manager;
 /// Monotonic counter so concurrent tasks never collide on a filename.
 static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Default image host. Local reference images (`data:` URIs / raw base64) are
-/// uploaded here to obtain a public URL the generation API can fetch.
-/// Overridable per request via `GenReq::upload_url`.
-const DEFAULT_UPLOAD_URL: &str = "https://imageproxy.zhongzhuan.chat/api/upload";
+// Local reference images (`data:` URIs / raw base64) are uploaded to the
+// platform's own OSS endpoint ({base}/api/v1/uploads/upload?public=true) to get
+// a public URL the generation API can fetch. See `generate_images`.
 
 // ---------- request payload (sent from the frontend) ----------
 
@@ -178,11 +177,17 @@ async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String
     }
 }
 
-/// Pull a public URL out of the image-host upload response.
-/// Mirrors the host's shapes: `url` | `data.url` | `result.url` | `file.url`.
+/// Pull a public URL out of the upload response.
+/// Platform OSS (`/api/v1/uploads/upload`) returns `data.signed_url` /
+/// `data.oss_url`; older third-party hosts use `url` | `data.url` | etc.
+/// Prefer `signed_url` (immediately fetchable), then the public `oss_url`.
 fn extract_uploaded_url(v: &serde_json::Value) -> Option<String> {
     let pick = |s: Option<&str>| s.filter(|x| !x.is_empty()).map(str::to_string);
-    pick(v["url"].as_str())
+    pick(v["data"]["signed_url"].as_str())
+        .or_else(|| pick(v["data"]["oss_url"].as_str()))
+        .or_else(|| pick(v["signed_url"].as_str()))
+        .or_else(|| pick(v["oss_url"].as_str()))
+        .or_else(|| pick(v["url"].as_str()))
         .or_else(|| pick(v["data"]["url"].as_str()))
         .or_else(|| pick(v["result"]["url"].as_str()))
         .or_else(|| pick(v["file"]["url"].as_str()))
@@ -193,6 +198,7 @@ fn extract_uploaded_url(v: &serde_json::Value) -> Option<String> {
 async fn upload_image(
     c: &reqwest::Client,
     upload_url: &str,
+    api_key: Option<&str>,
     bytes: Vec<u8>,
     mime: &str,
 ) -> Result<String, String> {
@@ -201,11 +207,13 @@ async fn upload_image(
         .mime_str(mime)
         .map_err(|e| format!("构造上传数据失败: {e}"))?;
     let form = reqwest::multipart::Form::new().part("file", part);
-    // The image host accepts anonymous uploads — do NOT forward the generation
-    // API key to this third-party host.
-    let resp = c
-        .post(upload_url)
-        .multipart(form)
+    // The platform OSS endpoint authenticates with the API key; a third-party
+    // host (if explicitly configured) takes anonymous uploads (api_key = None).
+    let mut rb = c.post(upload_url).multipart(form);
+    if let Some(key) = api_key {
+        rb = rb.bearer_auth(key);
+    }
+    let resp = rb
         .send()
         .await
         .map_err(|e| format!("上传图片失败: {e}"))?;
@@ -229,13 +237,18 @@ async fn upload_image(
 
 /// Turn a reference image into an http(s) URL the generation API can fetch.
 /// http(s) URLs pass through; `data:` URIs / raw base64 are uploaded first.
-async fn ref_to_url(c: &reqwest::Client, upload_url: &str, src: &str) -> Result<String, String> {
+async fn ref_to_url(
+    c: &reqwest::Client,
+    upload_url: &str,
+    api_key: Option<&str>,
+    src: &str,
+) -> Result<String, String> {
     let s = src.trim();
     if s.starts_with("http://") || s.starts_with("https://") {
         return Ok(s.to_string());
     }
     let (bytes, mime) = resolve_src(c, s).await?;
-    upload_image(c, upload_url, bytes, &mime).await
+    upload_image(c, upload_url, api_key, bytes, &mime).await
 }
 
 /// Save bytes under <Pictures>/xinghuo-image-tool/ and return the absolute path.
@@ -306,18 +319,29 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     let is_i2i = !raw_refs.is_empty();
     if is_i2i {
         // The generation API only fetches http(s) URLs, so any local image
-        // (an uploaded file or pasted clipboard image arrives as a `data:` URI)
-        // is uploaded to the image host first to obtain a public URL.
-        let upload_url = req
+        // (an uploaded file or pasted clipboard `data:` URI) is uploaded first.
+        // Default to the platform's own OSS endpoint (public=true so the
+        // downstream ChatGPT server can fetch it); it shares this base URL and
+        // authenticates with the same API key. The old public image host is
+        // flaky, so a saved `imageproxy...` upload URL is ignored on purpose.
+        let custom_host = req
             .upload_url
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_UPLOAD_URL);
+            .filter(|s| !s.is_empty() && !s.contains("imageproxy.zhongzhuan.chat"));
+        let (upload_url, upload_key): (String, Option<&str>) = match custom_host {
+            Some(host) => (host.to_string(), None),
+            None => (
+                format!("{base}/api/v1/uploads/upload?public=true"),
+                Some(req.api_key.as_str()),
+            ),
+        };
+        eprintln!("[generate_images] 参考图上传到: {upload_url}");
         let mut ref_urls: Vec<String> = Vec::with_capacity(raw_refs.len());
         for src in &raw_refs {
-            ref_urls.push(ref_to_url(&c, upload_url, src).await?);
+            ref_urls.push(ref_to_url(&c, &upload_url, upload_key, src).await?);
         }
+        eprintln!("[generate_images] 参考图 URL: {ref_urls:?}");
         body["image"] = serde_json::json!(ref_urls);
     }
     body["timeout_sec"] = serde_json::json!(timeout_sec);
@@ -328,71 +352,87 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
         body["debug_chatgpt_token"] = serde_json::json!(tok);
     }
 
-    // Single attempt (no retry). We time it so we can tell *where* it dies:
-    // a consistent elapsed value points at a gateway/LB timeout closing the
-    // connection; near-instant means the connection never really opened.
     let url = format!("{base}/v1/images/generations");
-    let started = std::time::Instant::now();
-    let send_result = c
-        .post(&url)
-        .bearer_auth(&req.api_key)
-        .json(&body)
-        .send()
-        .await;
-    let elapsed = started.elapsed();
-    let resp = match send_result {
-        Ok(resp) => {
-            eprintln!(
-                "[generate_images] 收到响应头: {} {:?} (耗时 {:.1}s)",
-                resp.status(),
-                resp.version(),
-                elapsed.as_secs_f64()
-            );
-            resp
-        }
-        Err(e) => {
-            // Full source chain for a readable, actionable message.
-            let mut detail = e.to_string();
-            let mut src = std::error::Error::source(&e);
-            while let Some(s) = src {
-                detail.push_str(&format!("\n  ↳ {s}"));
-                src = s.source();
+    let max_attempts: u32 = 3;
+    let mut attempt: u32 = 0;
+    let text = loop {
+        attempt += 1;
+        // Time each attempt so we can tell *where* it dies: a consistent elapsed
+        // (~120s) points at a gateway idle-timeout; near-instant means the
+        // connection never really opened.
+        let started = std::time::Instant::now();
+        let send_result = c
+            .post(&url)
+            .bearer_auth(&req.api_key)
+            .json(&body)
+            .send()
+            .await;
+        let elapsed = started.elapsed();
+        let resp = match send_result {
+            Ok(resp) => {
+                eprintln!(
+                    "[generate_images] 收到响应头: {} {:?} (耗时 {:.1}s, 第 {attempt}/{max_attempts} 次)",
+                    resp.status(),
+                    resp.version(),
+                    elapsed.as_secs_f64()
+                );
+                resp
             }
-            eprintln!(
-                "[generate_images] send 失败,耗时 {:.1}s — 服务器在返回任何响应头之前就关闭了连接(没有可打印的返回值)。",
-                elapsed.as_secs_f64()
-            );
-            eprintln!("[generate_images] {e:#?}");
-            return Err(format!(
-                "请求失败(等待 {:.0}s 后连接被关闭,服务器未返回任何数据): {detail}",
-                elapsed.as_secs_f64()
-            ));
+            Err(e) => {
+                let mut detail = e.to_string();
+                let mut src = std::error::Error::source(&e);
+                while let Some(s) = src {
+                    detail.push_str(&format!("\n  ↳ {s}"));
+                    src = s.source();
+                }
+                eprintln!(
+                    "[generate_images] send 失败,耗时 {:.1}s — 服务器在返回任何响应头之前就关闭了连接(没有可打印的返回值)。",
+                    elapsed.as_secs_f64()
+                );
+                eprintln!("[generate_images] {e:#?}");
+                return Err(format!(
+                    "请求失败(等待 {:.0}s 后连接被关闭,服务器未返回任何数据): {detail}",
+                    elapsed.as_secs_f64()
+                ));
+            }
+        };
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(text) => {
+                eprintln!(
+                    "[generate_images] 响应体读取完成: {} 字节,总耗时 {:.1}s\n[generate_images] 返回内容: {}",
+                    text.len(),
+                    started.elapsed().as_secs_f64(),
+                    truncate(&text, 1200)
+                );
+                text
+            }
+            Err(e) => {
+                eprintln!(
+                    "[generate_images] 读取响应体失败,总耗时 {:.1}s: {e:#?}",
+                    started.elapsed().as_secs_f64()
+                );
+                return Err(format!("读取响应失败: {e}"));
+            }
+        };
+        if status.is_success() {
+            break text;
         }
-    };
-    let status = resp.status();
-    // Stream the body so a partial/truncated payload is still logged before we
-    // error out — this is the only place a "return value" could exist.
-    let text = match resp.text().await {
-        Ok(text) => {
-            eprintln!(
-                "[generate_images] 响应体读取完成: {} 字节,总耗时 {:.1}s\n[generate_images] 返回内容: {}",
-                text.len(),
-                started.elapsed().as_secs_f64(),
-                truncate(&text, 1200)
-            );
-            text
+        // The server rotates among ChatGPT accounts; a request can land on one
+        // whose OAuth token was revoked ("token_revoked") and fail fast. These
+        // are transient, so retry to re-roll onto a (hopefully healthy) account.
+        let low = text.to_lowercase();
+        let transient = low.contains("token_revoked")
+            || low.contains("invalidated oauth token")
+            || low.contains("upload image failed")
+            || status.as_u16() == 503;
+        if transient && attempt < max_attempts {
+            eprintln!("[generate_images] 账号/上传类临时错误,重试 ({attempt}/{max_attempts})…");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
         }
-        Err(e) => {
-            eprintln!(
-                "[generate_images] 读取响应体失败,总耗时 {:.1}s: {e:#?}",
-                started.elapsed().as_secs_f64()
-            );
-            return Err(format!("读取响应失败: {e}"));
-        }
-    };
-    if !status.is_success() {
         return Err(error_message(status, &text));
-    }
+    };
 
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {e}"))?;
