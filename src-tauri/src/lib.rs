@@ -13,12 +13,14 @@ static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Upstream credentials the embedded gateway (gateway.rs) needs to serve the
 /// drama workspace: the image API (storyboard image gen, shared with the normal
-/// image tool) and the separate sub2api-style chat endpoint (gpt-5.5). The
-/// frontend pushes these via `configure_gateway` whenever settings are saved,
-/// so the chat key never has to live in the iframe'd workspace page.
+/// image tool), the chat endpoint (sub2api), pic2api video generation, dashscope
+/// voice dubbing, and ffmpeg for frame capture. The frontend pushes these via
+/// `configure_gateway` whenever settings are saved, so keys never leak into the
+/// iframe'd workspace page.
 #[derive(Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayConfig {
+    // --- image api (shared with the normal image tool) ---
     #[serde(default)]
     pub img_base: String,
     #[serde(default)]
@@ -29,12 +31,30 @@ pub struct GatewayConfig {
     pub img_upload_url: String,
     #[serde(default)]
     pub img_timeout: u32,
+    // --- chat upstream (sub2api) ---
     #[serde(default)]
     pub chat_base: String,
     #[serde(default)]
     pub chat_key: String,
     #[serde(default)]
     pub chat_model: String,
+    // --- pic2api video generation ---
+    #[serde(default)]
+    pub pic2api_base: String,
+    #[serde(default)]
+    pub pic2api_key: String,
+    #[serde(default)]
+    pub pic2api_model: String,
+    // --- dashscope voice dubbing ---
+    #[serde(default)]
+    pub dashscope_key: String,
+    #[serde(default)]
+    pub dashscope_design_model: String,
+    #[serde(default)]
+    pub dashscope_tts_model: String,
+    // --- ffmpeg ---
+    #[serde(default)]
+    pub ffmpeg_path: String,
     /// Port the embedded server actually bound to (filled in Rust-side).
     #[serde(skip)]
     pub self_port: u16,
@@ -541,7 +561,8 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
 
 /// Push upstream credentials from the frontend into the gateway's shared state.
 /// Called whenever the user saves settings, so the iframe'd drama workspace can
-/// generate storyboard images and chat (gpt-5.5) without holding any keys.
+/// generate storyboard images, chat, video (pic2api) and voice (dashscope) without
+/// holding any keys.
 #[tauri::command]
 fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) {
     let mut guard = state.write().unwrap();
@@ -553,6 +574,13 @@ fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) 
     guard.chat_base = cfg.chat_base;
     guard.chat_key = cfg.chat_key;
     guard.chat_model = cfg.chat_model;
+    guard.pic2api_base = cfg.pic2api_base;
+    guard.pic2api_key = cfg.pic2api_key;
+    guard.pic2api_model = cfg.pic2api_model;
+    guard.dashscope_key = cfg.dashscope_key;
+    guard.dashscope_design_model = cfg.dashscope_design_model;
+    guard.dashscope_tts_model = cfg.dashscope_tts_model;
+    guard.ffmpeg_path = cfg.ffmpeg_path;
 }
 
 /// URL of the embedded workspace server, e.g. `http://127.0.0.1:12733/main.html`.

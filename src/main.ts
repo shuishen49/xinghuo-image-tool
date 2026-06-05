@@ -22,6 +22,16 @@ interface Settings {
   chatBase: string;
   chatKey: string;
   chatModel: string;
+  // --- pic2api video generation ---
+  pic2apiBase: string;
+  pic2apiKey: string;
+  pic2apiModel: string;
+  // --- dashscope dubbing ---
+  dashscopeKey: string;
+  dashscopeDesignModel: string;
+  dashscopeTtsModel: string;
+  // --- ffmpeg for frame capture ---
+  ffmpegPath: string;
 }
 interface RefImg {
   value: string; // http(s) URL or data: URI
@@ -61,6 +71,10 @@ const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 const DEFAULT_UPLOAD = "";
 const DEFAULT_CHAT_BASE = "https://sub.linggan10s.shop/v1";
 const DEFAULT_CHAT_MODEL = "gpt-5.5";
+const DEFAULT_PIC2API_BASE = "https://www.pic2api.com/v1";
+const DEFAULT_PIC2API_MODEL = "sora2-pro";
+const DEFAULT_DASHSCOPE_DESIGN = "qwen-voice-design";
+const DEFAULT_DASHSCOPE_TTS = "qwen3-tts-vd-realtime-2026-01-15";
 
 function loadSettings(): Settings {
   const d: Settings = {
@@ -76,6 +90,13 @@ function loadSettings(): Settings {
     chatBase: DEFAULT_CHAT_BASE,
     chatKey: "",
     chatModel: DEFAULT_CHAT_MODEL,
+    pic2apiBase: DEFAULT_PIC2API_BASE,
+    pic2apiKey: "",
+    pic2apiModel: DEFAULT_PIC2API_MODEL,
+    dashscopeKey: "",
+    dashscopeDesignModel: DEFAULT_DASHSCOPE_DESIGN,
+    dashscopeTtsModel: DEFAULT_DASHSCOPE_TTS,
+    ffmpegPath: "",
   };
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -94,6 +115,13 @@ function loadSettings(): Settings {
         chatBase: s.chatBase ?? d.chatBase,
         chatKey: s.chatKey ?? d.chatKey,
         chatModel: s.chatModel ?? d.chatModel,
+        pic2apiBase: s.pic2apiBase ?? d.pic2apiBase,
+        pic2apiKey: s.pic2apiKey ?? d.pic2apiKey,
+        pic2apiModel: s.pic2apiModel ?? d.pic2apiModel,
+        dashscopeKey: s.dashscopeKey ?? d.dashscopeKey,
+        dashscopeDesignModel: s.dashscopeDesignModel ?? d.dashscopeDesignModel,
+        dashscopeTtsModel: s.dashscopeTtsModel ?? d.dashscopeTtsModel,
+        ffmpegPath: s.ffmpegPath ?? d.ffmpegPath,
       };
 
       // --- one-time migration of stale saved settings ---
@@ -288,6 +316,46 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <input id="set-chat-model" type="text" placeholder="${DEFAULT_CHAT_MODEL}" />
       </label>
       <div class="row">
+      <hr style="border-color:var(--border);margin:16px 0;" />
+      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
+        🎬 视频接口（pic2api） — 漫剧工作台视频生成的独立接口
+      </p>
+      <label class="field">
+        <span>视频接口地址</span>
+        <input id="set-pic2api-base" type="text" placeholder="${DEFAULT_PIC2API_BASE}" />
+      </label>
+      <label class="field">
+        <span>视频 API Key</span>
+        <input id="set-pic2api-key" type="password" placeholder="sk-..." />
+      </label>
+      <label class="field">
+        <span>视频默认模型</span>
+        <input id="set-pic2api-model" type="text" placeholder="${DEFAULT_PIC2API_MODEL}" />
+      </label>
+      <hr style="border-color:var(--border);margin:16px 0;" />
+      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
+        🎙️ 配音接口（DashScope / 阿里云） — 可留空，用本地模拟音
+      </p>
+      <label class="field">
+        <span>DashScope API Key</span>
+        <input id="set-dashscope-key" type="password" placeholder="sk-..." />
+      </label>
+      <label class="field">
+        <span>音色设计模型</span>
+        <input id="set-dashscope-design" type="text" placeholder="${DEFAULT_DASHSCOPE_DESIGN}" />
+      </label>
+      <label class="field">
+        <span>TTS 模型</span>
+        <input id="set-dashscope-tts" type="text" placeholder="${DEFAULT_DASHSCOPE_TTS}" />
+      </label>
+      <hr style="border-color:var(--border);margin:16px 0;" />
+      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
+        🎞️ 视频截帧（ffmpeg） — 留空用系统 PATH 里的 ffmpeg
+      </p>
+      <label class="field">
+        <span>ffmpeg 路径</span>
+        <input id="set-ffmpeg-path" type="text" placeholder="留空或用绝对路径" />
+      </label>
         <button class="primary" id="btn-save">保存设置</button>
       </div>
       <div class="status" id="set-status"></div>
@@ -295,7 +363,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         生成的图片会自动保存到「图片 / Pictures」目录下的 <code>xinghuo-image-tool</code> 文件夹。设置仅保存在本机。<br />
         模型：<code>gpt-5-3</code> = GPT-Image（标准）；<code>gpt-5-4-thinking</code> = GPT-Image2（仅 Plus 账户可用）。<br />
         点「生成」会把任务加入队列并立刻返回，可连续提交；同时进行的数量由「最大同时任务数」控制，多出的会排队。<br />
-        漫剧工作台的聊天接口与图片接口独立配置，聊天 Key <b>留在 Rust 端</b>，工作台页面拿不到。
+        漫剧工作台的所有 Key <b>留在 Rust 端</b>，工作台页面拿不到。
       </p>
     </section>
   </main>
@@ -732,6 +800,13 @@ const uploadInput = byId<HTMLInputElement>("set-upload");
 const chatBaseInput = byId<HTMLInputElement>("set-chat-base");
 const chatKeyInput = byId<HTMLInputElement>("set-chat-key");
 const chatModelInput = byId<HTMLInputElement>("set-chat-model");
+const pic2apiBaseInput = byId<HTMLInputElement>("set-pic2api-base");
+const pic2apiKeyInput = byId<HTMLInputElement>("set-pic2api-key");
+const pic2apiModelInput = byId<HTMLInputElement>("set-pic2api-model");
+const dashscopeKeyInput = byId<HTMLInputElement>("set-dashscope-key");
+const dashscopeDesignInput = byId<HTMLInputElement>("set-dashscope-design");
+const dashscopeTtsInput = byId<HTMLInputElement>("set-dashscope-tts");
+const ffmpegPathInput = byId<HTMLInputElement>("set-ffmpeg-path");
 
 baseInput.value = settings.baseUrl;
 keyInput.value = settings.apiKey;
@@ -743,6 +818,13 @@ uploadInput.value = settings.uploadUrl;
 chatBaseInput.value = settings.chatBase;
 chatKeyInput.value = settings.chatKey;
 chatModelInput.value = settings.chatModel;
+pic2apiBaseInput.value = settings.pic2apiBase;
+pic2apiKeyInput.value = settings.pic2apiKey;
+pic2apiModelInput.value = settings.pic2apiModel;
+dashscopeKeyInput.value = settings.dashscopeKey;
+dashscopeDesignInput.value = settings.dashscopeDesignModel;
+dashscopeTtsInput.value = settings.dashscopeTtsModel;
+ffmpegPathInput.value = settings.ffmpegPath;
 
 // Push settings to the embedded gateway (image gen + chat upstream keys).
 async function syncGatewayConfig() {
@@ -757,6 +839,13 @@ async function syncGatewayConfig() {
         chatBase: settings.chatBase || DEFAULT_CHAT_BASE,
         chatKey: settings.chatKey,
         chatModel: settings.chatModel || DEFAULT_CHAT_MODEL,
+        pic2apiBase: settings.pic2apiBase || DEFAULT_PIC2API_BASE,
+        pic2apiKey: settings.pic2apiKey,
+        pic2apiModel: settings.pic2apiModel || DEFAULT_PIC2API_MODEL,
+        dashscopeKey: settings.dashscopeKey,
+        dashscopeDesignModel: settings.dashscopeDesignModel || DEFAULT_DASHSCOPE_DESIGN,
+        dashscopeTtsModel: settings.dashscopeTtsModel || DEFAULT_DASHSCOPE_TTS,
+        ffmpegPath: settings.ffmpegPath,
       },
     });
   } catch (e) {
@@ -779,6 +868,13 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
     chatBase: chatBaseInput.value.trim() || DEFAULT_CHAT_BASE,
     chatKey: chatKeyInput.value.trim(),
     chatModel: chatModelInput.value.trim() || DEFAULT_CHAT_MODEL,
+    pic2apiBase: pic2apiBaseInput.value.trim() || DEFAULT_PIC2API_BASE,
+    pic2apiKey: pic2apiKeyInput.value.trim(),
+    pic2apiModel: pic2apiModelInput.value.trim() || DEFAULT_PIC2API_MODEL,
+    dashscopeKey: dashscopeKeyInput.value.trim(),
+    dashscopeDesignModel: dashscopeDesignInput.value.trim() || DEFAULT_DASHSCOPE_DESIGN,
+    dashscopeTtsModel: dashscopeTtsInput.value.trim() || DEFAULT_DASHSCOPE_TTS,
+    ffmpegPath: ffmpegPathInput.value.trim(),
   };
   timeoutInput.value = String(settings.timeoutSec);
   concurrencyInput.value = String(settings.maxConcurrent);
