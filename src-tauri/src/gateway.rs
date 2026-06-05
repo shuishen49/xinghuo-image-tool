@@ -750,20 +750,47 @@ async fn handle_chat(
     if !model.is_empty() { body["model"] = json!(model); }
 
     let url = chat_url(&base);
-    let client = match crate::http_client(300) { Ok(c) => c, Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})) };
-    // Always use the configured chat key from main app settings.
-    // The workspace page must not send its own key; all keys stay Rust-side.
     if key.is_empty() {
         return err_json(StatusCode::BAD_GATEWAY,
             json!({"error":{"message":"聊天接口未配置 API Key，请在设置页的「漫剧工作台 · 聊天接口」填写"}}));
     }
-    let rb = client.post(&url).json(&body).bearer_auth(&key);
 
-    match rb.send().await {
-        Ok(r) => { let st=r.status(); let t=r.text().await.unwrap_or_default();
-            Response::builder().status(st).header(header::CONTENT_TYPE,"application/json").body(Body::from(t)).unwrap() }
-        Err(e) => err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":format!("chat upstream failed: {e}")}})),
+    // Try up to 3 times, with increasing timeout per attempt.
+    for attempt in 1..=3u32 {
+        let timeout = if attempt == 1 { 480 } else { 600 };
+        let client = match crate::http_client(timeout) {
+            Ok(c) => c,
+            Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})),
+        };
+        let rb = client.post(&url).json(&body).bearer_auth(&key);
+
+        match rb.send().await {
+            Ok(r) => {
+                let st = r.status();
+                let t = r.text().await.unwrap_or_default();
+                // If upstream nginx timed out (504), retry
+                if st.as_u16() == 504 && attempt < 3 {
+                    eprintln!("[gateway] chat upstream 504, retry {attempt}/3…");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                return Response::builder().status(st)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(t)).unwrap();
+            }
+            Err(e) => {
+                if attempt < 3 {
+                    eprintln!("[gateway] chat request failed (attempt {attempt}/3): {e}");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                return err_json(StatusCode::BAD_GATEWAY,
+                    json!({"error":{"message":format!("聊天接口请求失败：{e}")}}));
+            }
+        }
     }
+    // unreachable
+    err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":"chat exhausted retries"}}))
 }
 
 fn chat_url(base: &str) -> String {

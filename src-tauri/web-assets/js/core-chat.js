@@ -314,15 +314,31 @@ function setChatSendingState(sending){
   chatSending = !!sending;
   const btn = q('chatSendBtn');
   const input = q('chatInput');
+  const box = q('chatMessages');
   if(btn){
     btn.disabled = chatSending;
     if(chatSending){
-      btn.textContent = '发送中…';
+      btn.textContent = '思考中…';
     } else {
       btn.textContent = '发送';
     }
   }
   if(input) input.disabled = chatSending;
+  // Thinking animation: insert/remove a loading indicator in the chat area
+  if(box){
+    let thinkEl = box.querySelector('.msg.thinking');
+    if(chatSending){
+      if(!thinkEl){
+        thinkEl = document.createElement('div');
+        thinkEl.className = 'msg bot thinking';
+        thinkEl.innerHTML = '<div class="md-content"><div class="think-dots"><span></span><span></span><span></span></div><p style="color:var(--muted);font-size:13px;">思考中…</p></div>';
+        box.appendChild(thinkEl);
+      }
+    } else {
+      if(thinkEl) thinkEl.remove();
+    }
+  }
+  if(box) box.scrollTop = box.scrollHeight;
 }
 
 
@@ -855,21 +871,48 @@ function renderChat(){
   const box = q('chatMessages');
   if(!box) return;
   if(!chatHistory.length){
-    box.innerHTML = '<div class="msg bot"><div class="md-content"><p>已就绪。现在不是假回复了，点发送会真的请求聊天接口。</p></div></div>';
+    box.innerHTML = '<div class="msg bot"><div class="md-content"><p>已就绪。点发送会真的请求聊天接口。</p></div></div>';
     return;
   }
-  box.innerHTML = chatHistory.map(m => {
+  box.innerHTML = chatHistory.map((m, idx) => {
     const isUser = m.role === 'user';
     const body = isUser ? escapeHtml(m.text) : markdownToHtml(m.text);
-    return `<div class="msg ${isUser ? 'user' : 'bot'}">${isUser ? body : `<div class="md-content">${body}</div>`}</div>`;
+    const isLast = idx === chatHistory.length - 1;
+    let extra = '';
+    if (!isUser && m.isError && isLast) {
+      extra = `<div class="chat-retry-row"><button class="chat-retry-btn" onclick="window.__chatRetryLast()">🔄 重新发送</button></div>`;
+    }
+    return `<div class="msg ${isUser ? 'user' : 'bot'}">${isUser ? body : `<div class="md-content">${body}</div>`}${extra}</div>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
 }
 
-function addChat(role, text){
+window.__chatRetryLast = function(){
+  // Find last user message and re-send it
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    if (chatHistory[i].role === 'user') {
+      const txt = chatHistory[i].text;
+      // Remove the failed bot reply
+      if (chatHistory[chatHistory.length - 1].isError) chatHistory.pop();
+      saveChat();
+      // Trigger re-send
+      const input = q('chatInput');
+      if (input) {
+        input.value = txt;
+        // Use setTimeout to let the DOM settle
+        setTimeout(() => {
+          if (typeof sendChat === 'function') sendChat();
+        }, 50);
+      }
+      return;
+    }
+  }
+};
+
+function addChat(role, text, opts = {}){
   const t = String(text || '').trim();
   if(!t) return;
-  chatHistory.push({ role, text: t, ts: Date.now() });
+  chatHistory.push({ role, text: t, ts: Date.now(), isError: !!opts.isError });
   if(chatHistory.length > 200) chatHistory = chatHistory.slice(-200);
   saveChat();
   renderChat();
@@ -932,7 +975,7 @@ async function sendChat(){
       setChatStatus('已取消本次请求。', true);
     } else {
       const msg = `${editMode === 'character' ? '角色修改' : '大纲修改'}失败：${err?.message || err}`;
-      addChat('bot', msg);
+      addChat('bot', msg, { isError: true });
       setChatStatus(msg, false);
     }
   } finally {

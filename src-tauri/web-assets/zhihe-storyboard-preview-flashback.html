@@ -1105,6 +1105,30 @@
       z-index: 2;
     }
     .panel-close-x:hover { background: #1f2937; }
+
+    /* Thinking dots animation */
+    .msg.thinking .md-content { padding: 12px 16px; }
+    .think-dots { display: inline-flex; gap: 4px; margin-right: 6px; vertical-align: middle; }
+    .think-dots span {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--cyan, #22d3ee);
+      animation: thinkBounce 1.2s infinite ease-in-out;
+    }
+    .think-dots span:nth-child(1) { animation-delay: 0s; }
+    .think-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .think-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes thinkBounce {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+      40% { transform: scale(1.2); opacity: 1; }
+    }
+
+    /* Chat retry button */
+    .chat-retry-row { margin-top: 8px; text-align: right; }
+    .chat-retry-btn {
+      padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border, #374151);
+      background: rgba(34,211,238,0.1); color: var(--cyan, #22d3ee); font-size: 12px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .chat-retry-btn:hover { background: rgba(34,211,238,0.2); }
   </style>
 </head>
 <body>
