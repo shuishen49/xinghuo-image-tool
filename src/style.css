@@ -495,3 +495,41 @@ button:disabled {
     transform: rotate(360deg);
   }
 }
+
+/* lightbox: click any image to enlarge */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+.lightbox.hidden {
+  display: none;
+}
+.lightbox img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* drama workspace iframe: fill the window */
+#panel-drama {
+  position: absolute;
+  top: 60px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  gap: 0;
+}
+
+#drama-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}

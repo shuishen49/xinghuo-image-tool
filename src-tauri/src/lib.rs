@@ -1,11 +1,49 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+mod gateway;
+
 /// Monotonic counter so concurrent tasks never collide on a filename.
 static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Upstream credentials the embedded gateway (gateway.rs) needs to serve the
+/// drama workspace: the image API (storyboard image gen, shared with the normal
+/// image tool) and the separate sub2api-style chat endpoint (gpt-5.5). The
+/// frontend pushes these via `configure_gateway` whenever settings are saved,
+/// so the chat key never has to live in the iframe'd workspace page.
+#[derive(Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayConfig {
+    #[serde(default)]
+    pub img_base: String,
+    #[serde(default)]
+    pub img_key: String,
+    #[serde(default)]
+    pub img_model: String,
+    #[serde(default)]
+    pub img_upload_url: String,
+    #[serde(default)]
+    pub img_timeout: u32,
+    #[serde(default)]
+    pub chat_base: String,
+    #[serde(default)]
+    pub chat_key: String,
+    #[serde(default)]
+    pub chat_model: String,
+    /// Port the embedded server actually bound to (filled in Rust-side).
+    #[serde(skip)]
+    pub self_port: u16,
+    /// Root dir the gateway serves user project data + generated images from.
+    #[serde(skip)]
+    pub workspace_dir: PathBuf,
+}
+
+pub type SharedConfig = Arc<RwLock<GatewayConfig>>;
 
 // Local reference images (`data:` URIs / raw base64) are uploaded to the
 // platform's own OSS endpoint ({base}/api/v1/uploads/upload?public=true) to get
@@ -53,6 +91,34 @@ struct ImageOut {
     source_url: Option<String>,
 }
 
+/// Base64 + mime of an image read back from disk (for restoring persisted tasks).
+#[derive(Serialize)]
+struct SavedImage {
+    b64: String,
+    mime: String,
+}
+
+pub(crate) fn mime_for_path(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    }
+}
+
+/// Read a previously-saved image file and return it as base64 for preview.
+/// Used when the app reopens and re-renders persisted task results from disk
+/// (so we never have to store heavy base64 in the browser's localStorage).
+#[tauri::command]
+fn read_saved_image(path: String) -> Result<SavedImage, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取图片失败: {e}"))?;
+    Ok(SavedImage {
+        b64: B64.encode(&bytes),
+        mime: mime_for_path(&path).to_string(),
+    })
+}
+
 // ---------- helpers ----------
 
 fn normalize_base(base: &str) -> String {
@@ -63,7 +129,7 @@ fn normalize_base(base: &str) -> String {
     b
 }
 
-fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+pub(crate) fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     // NOTE: do NOT set .tcp_keepalive() here. Image generation keeps the
     // connection silent for several minutes; on some network paths a stateful
     // firewall/NAT drops the keepalive probe packets, so enabling keepalive
@@ -91,7 +157,7 @@ fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))
 }
 
-fn ext_for(mime: &str) -> &'static str {
+pub(crate) fn ext_for(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
@@ -148,7 +214,7 @@ async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String)
 }
 
 /// Resolve an http(s) URL or `data:` URI to raw bytes + mime.
-async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
+pub(crate) async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
     if let Some(rest) = src.strip_prefix("data:") {
         let (meta, data) = rest.split_once(',').ok_or("无效的 data URI")?;
         let mime = meta.split(';').next().unwrap_or("image/png").to_string();
@@ -295,60 +361,62 @@ fn to_out(
 
 // ---------- command ----------
 
-/// POST {base}/v1/images/generations (OpenAI-compatible).
-/// Text-to-image when `image` is empty; image-to-image when it has reference URLs.
-#[tauri::command]
-async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<ImageOut>, String> {
-    if req.prompt.trim().is_empty() {
+/// Core generation call shared by the Tauri command and the embedded gateway.
+/// POSTs {base}/v1/images/generations (OpenAI-compatible) and returns the list
+/// of resolved (bytes, mime, source_url) images. Reference images are uploaded
+/// to OSS first when doing image-to-image. Saving to disk is the caller's job.
+pub async fn run_generation(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    size: Option<&str>,
+    refs: &[String],
+    timeout_sec: u32,
+    account_tier: Option<&str>,
+    debug_token: Option<&str>,
+    upload_url_override: Option<&str>,
+) -> Result<Vec<(Vec<u8>, String, Option<String>)>, String> {
+    if prompt.trim().is_empty() {
         return Err("prompt 不能为空".into());
     }
-    let base = normalize_base(&req.base_url);
-    // server waits up to timeout_sec; give the client a margin on top.
-    let timeout_sec = req.timeout_sec.unwrap_or(300).clamp(10, 1800);
+    let base = normalize_base(base_url);
+    let timeout_sec = timeout_sec.clamp(10, 1800);
     let c = http_client(timeout_sec as u64 + 60)?;
 
-    // Only fields allowed by the schema (additionalProperties: false).
     let mut body = serde_json::json!({
-        "model": req.model,
-        "prompt": req.prompt,
+        "model": model,
+        "prompt": prompt,
     });
-    if let Some(size) = req.size.as_ref().filter(|s| !s.is_empty()) {
+    if let Some(size) = size.filter(|s| !s.is_empty()) {
         body["size"] = serde_json::json!(size);
     }
-    let raw_refs: Vec<&String> = req.image.iter().filter(|s| !s.trim().is_empty()).collect();
+    let raw_refs: Vec<&String> = refs.iter().filter(|s| !s.trim().is_empty()).collect();
     let is_i2i = !raw_refs.is_empty();
     if is_i2i {
-        // The generation API only fetches http(s) URLs, so any local image
-        // (an uploaded file or pasted clipboard `data:` URI) is uploaded first.
-        // Default to the platform's own OSS endpoint (public=true so the
-        // downstream ChatGPT server can fetch it); it shares this base URL and
-        // authenticates with the same API key. The old public image host is
-        // flaky, so a saved `imageproxy...` upload URL is ignored on purpose.
-        let custom_host = req
-            .upload_url
-            .as_deref()
+        let custom_host = upload_url_override
             .map(str::trim)
             .filter(|s| !s.is_empty() && !s.contains("imageproxy.zhongzhuan.chat"));
         let (upload_url, upload_key): (String, Option<&str>) = match custom_host {
             Some(host) => (host.to_string(), None),
             None => (
                 format!("{base}/api/v1/uploads/upload?public=true"),
-                Some(req.api_key.as_str()),
+                Some(api_key),
             ),
         };
-        eprintln!("[generate_images] 参考图上传到: {upload_url}");
+        eprintln!("[run_generation] 参考图上传到: {upload_url}");
         let mut ref_urls: Vec<String> = Vec::with_capacity(raw_refs.len());
         for src in &raw_refs {
             ref_urls.push(ref_to_url(&c, &upload_url, upload_key, src).await?);
         }
-        eprintln!("[generate_images] 参考图 URL: {ref_urls:?}");
+        eprintln!("[run_generation] 参考图 URL: {ref_urls:?}");
         body["image"] = serde_json::json!(ref_urls);
     }
     body["timeout_sec"] = serde_json::json!(timeout_sec);
-    if let Some(tier) = req.account_tier.as_ref().filter(|s| !s.is_empty()) {
+    if let Some(tier) = account_tier.filter(|s| !s.is_empty()) {
         body["debug_account_tier"] = serde_json::json!(tier);
     }
-    if let Some(tok) = req.debug_token.as_ref().filter(|s| !s.is_empty()) {
+    if let Some(tok) = debug_token.filter(|s| !s.is_empty()) {
         body["debug_chatgpt_token"] = serde_json::json!(tok);
     }
 
@@ -357,13 +425,10 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     let mut attempt: u32 = 0;
     let text = loop {
         attempt += 1;
-        // Time each attempt so we can tell *where* it dies: a consistent elapsed
-        // (~120s) points at a gateway idle-timeout; near-instant means the
-        // connection never really opened.
         let started = std::time::Instant::now();
         let send_result = c
             .post(&url)
-            .bearer_auth(&req.api_key)
+            .bearer_auth(api_key)
             .json(&body)
             .send()
             .await;
@@ -371,7 +436,7 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
         let resp = match send_result {
             Ok(resp) => {
                 eprintln!(
-                    "[generate_images] 收到响应头: {} {:?} (耗时 {:.1}s, 第 {attempt}/{max_attempts} 次)",
+                    "[run_generation] 收到响应头: {} {:?} (耗时 {:.1}s, 第 {attempt}/{max_attempts} 次)",
                     resp.status(),
                     resp.version(),
                     elapsed.as_secs_f64()
@@ -385,11 +450,6 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
                     detail.push_str(&format!("\n  ↳ {s}"));
                     src = s.source();
                 }
-                eprintln!(
-                    "[generate_images] send 失败,耗时 {:.1}s — 服务器在返回任何响应头之前就关闭了连接(没有可打印的返回值)。",
-                    elapsed.as_secs_f64()
-                );
-                eprintln!("[generate_images] {e:#?}");
                 return Err(format!(
                     "请求失败(等待 {:.0}s 后连接被关闭,服务器未返回任何数据): {detail}",
                     elapsed.as_secs_f64()
@@ -397,37 +457,20 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
             }
         };
         let status = resp.status();
-        let text = match resp.text().await {
-            Ok(text) => {
-                eprintln!(
-                    "[generate_images] 响应体读取完成: {} 字节,总耗时 {:.1}s\n[generate_images] 返回内容: {}",
-                    text.len(),
-                    started.elapsed().as_secs_f64(),
-                    truncate(&text, 1200)
-                );
-                text
-            }
-            Err(e) => {
-                eprintln!(
-                    "[generate_images] 读取响应体失败,总耗时 {:.1}s: {e:#?}",
-                    started.elapsed().as_secs_f64()
-                );
-                return Err(format!("读取响应失败: {e}"));
-            }
-        };
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {e}"))?;
         if status.is_success() {
             break text;
         }
-        // The server rotates among ChatGPT accounts; a request can land on one
-        // whose OAuth token was revoked ("token_revoked") and fail fast. These
-        // are transient, so retry to re-roll onto a (hopefully healthy) account.
         let low = text.to_lowercase();
         let transient = low.contains("token_revoked")
             || low.contains("invalidated oauth token")
             || low.contains("upload image failed")
             || status.as_u16() == 503;
         if transient && attempt < max_attempts {
-            eprintln!("[generate_images] 账号/上传类临时错误,重试 ({attempt}/{max_attempts})…");
+            eprintln!("[run_generation] 账号/上传类临时错误,重试 ({attempt}/{max_attempts})…");
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             continue;
         }
@@ -440,11 +483,9 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
         .as_array()
         .ok_or_else(|| format!("响应缺少 data 数组: {}", truncate(&text, 300)))?;
 
-    let tag = if is_i2i { "img2img" } else { "txt2img" };
     let mut outs = Vec::new();
     let mut last_err = String::new();
-    for (i, item) in data.iter().enumerate() {
-        // Per spec both `url` and `b64_json` hold the image URL; prefer `url`.
+    for item in data.iter() {
         let Some(src) = item["url"]
             .as_str()
             .or_else(|| item["b64_json"].as_str())
@@ -455,7 +496,7 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
         match resolve_src(&c, src).await {
             Ok((bytes, mime)) => {
                 let source_url = src.starts_with("http").then(|| src.to_string());
-                outs.push(to_out(&app, bytes, mime, tag, i, source_url)?);
+                outs.push((bytes, mime, source_url));
             }
             Err(e) => last_err = e,
         }
@@ -471,6 +512,57 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     Ok(outs)
 }
 
+/// POST {base}/v1/images/generations (OpenAI-compatible).
+/// Text-to-image when `image` is empty; image-to-image when it has reference URLs.
+#[tauri::command]
+async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<ImageOut>, String> {
+    let is_i2i = req.image.iter().any(|s| !s.trim().is_empty());
+    let outs = run_generation(
+        &req.base_url,
+        &req.api_key,
+        &req.model,
+        &req.prompt,
+        req.size.as_deref(),
+        &req.image,
+        req.timeout_sec.unwrap_or(300),
+        req.account_tier.as_deref(),
+        req.debug_token.as_deref(),
+        req.upload_url.as_deref(),
+    )
+    .await?;
+
+    let tag = if is_i2i { "img2img" } else { "txt2img" };
+    let mut result = Vec::new();
+    for (i, (bytes, mime, source_url)) in outs.into_iter().enumerate() {
+        result.push(to_out(&app, bytes, mime, tag, i, source_url)?);
+    }
+    Ok(result)
+}
+
+/// Push upstream credentials from the frontend into the gateway's shared state.
+/// Called whenever the user saves settings, so the iframe'd drama workspace can
+/// generate storyboard images and chat (gpt-5.5) without holding any keys.
+#[tauri::command]
+fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) {
+    let mut guard = state.write().unwrap();
+    guard.img_base = cfg.img_base;
+    guard.img_key = cfg.img_key;
+    guard.img_model = cfg.img_model;
+    guard.img_upload_url = cfg.img_upload_url;
+    guard.img_timeout = cfg.img_timeout;
+    guard.chat_base = cfg.chat_base;
+    guard.chat_key = cfg.chat_key;
+    guard.chat_model = cfg.chat_model;
+}
+
+/// URL of the embedded workspace server, e.g. `http://127.0.0.1:12733/main.html`.
+/// The frontend navigates an iframe here to open the drama workspace.
+#[tauri::command]
+fn gateway_url(state: tauri::State<'_, SharedConfig>) -> String {
+    let port = state.read().unwrap().self_port;
+    format!("http://127.0.0.1:{port}")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -482,9 +574,33 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Workspace dir: <Pictures>/xinghuo-image-tool/projects (shares the
+            // root where generated images already land). The gateway serves
+            // project JSON + saved scene images out of here.
+            let workspace_dir = app
+                .path()
+                .picture_dir()
+                .or_else(|_| app.path().app_data_dir())
+                .map(|d| d.join("xinghuo-image-tool").join("projects"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("xinghuo-projects"));
+            let _ = std::fs::create_dir_all(&workspace_dir);
+
+            let config: SharedConfig = Arc::new(RwLock::new(GatewayConfig {
+                workspace_dir,
+                ..Default::default()
+            }));
+            let port = gateway::start(config.clone());
+            config.write().unwrap().self_port = port;
+            app.manage(config);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![generate_images])
+        .invoke_handler(tauri::generate_handler![
+            generate_images,
+            read_saved_image,
+            configure_gateway,
+            gateway_url
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -29,4 +29,9 @@ tauri-plugin-log = "2"
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "http2"] }
 base64 = "0.22"
 # only need timers (sleep) for retry back-off; reqwest already pulls tokio in
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "rt-multi-thread"] }
+# Embedded local HTTP server: serves the drama workspace static files and acts
+# as the gateway that replaces the old openclaw bridge (image gen,
+# scene-image save-local, project discovery, chat-completions forwarding).
+axum = "0.7"
+rust-embed = "8"

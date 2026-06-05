@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grok Drama｜项目入口</title>
+  <style>
+    :root {
+      --bg: #0a0b0e;
+      --panel: rgba(20, 22, 28, 0.82);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --cyan: #22d3ee;
+      --cyan-glow: rgba(34, 211, 238, 0.3);
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --radius-lg: 20px;
+      --radius-md: 12px;
+      --shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+      --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      --ok: #10b981;
+      --err: #ef4444;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 56px 20px;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(34, 211, 238, 0.06) 0%, transparent 30%),
+        radial-gradient(circle at 90% 90%, rgba(59, 130, 246, 0.06) 0%, transparent 30%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1000px;
+      animation: fadeIn 0.5s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 30px;
+      gap: 16px;
+    }
+
+    .title-area h1 {
+      font-size: 32px;
+      font-weight: 800;
+      margin: 0 0 8px;
+      background: linear-gradient(135deg, #fff, var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .title-area p {
+      color: var(--muted);
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .search-area {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    #projectSelect,
+    #quickList,
+    #loadBtn {
+      display: none;
+    }
+
+    .search-input-wrap {
+      position: relative;
+      width: 320px;
+    }
+
+    #projectInput {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--panel-border);
+      color: #fff;
+      padding: 11px 16px;
+      border-radius: 999px;
+      font-size: 14px;
+      transition: var(--transition);
+    }
+
+    #projectInput:focus,
+    #createInput:focus {
+      outline: none;
+      border-color: var(--cyan);
+      background: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 0 0 3px var(--cyan-glow);
+    }
+
+    .btn-icon {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--panel-border);
+      color: #fff;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .btn-icon:hover {
+      background: var(--cyan-glow);
+      border-color: var(--cyan);
+      color: var(--cyan);
+      transform: rotate(20deg);
+    }
+
+    .project-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 320px;
+    }
+
+    .create-card {
+      background: rgba(34, 211, 238, 0.03);
+      border: 2px dashed rgba(34, 211, 238, 0.24);
+      border-radius: var(--radius-lg);
+      padding: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: var(--transition);
+      margin-bottom: 2px;
+    }
+
+    .create-card:hover {
+      background: rgba(34, 211, 238, 0.08);
+      border-color: var(--cyan);
+      transform: translateY(-2px);
+    }
+
+    .create-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      color: var(--cyan);
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .create-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--cyan-glow);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      font-weight: 500;
+    }
+
+    .create-form {
+      display: none;
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--cyan);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      margin-bottom: 10px;
+      animation: slideDown 0.25s ease-out;
+    }
+
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .create-form-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    #createInput {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--panel-border);
+      color: #fff;
+      padding: 11px 14px;
+      border-radius: var(--radius-md);
+      font-size: 14px;
+    }
+
+    #createBtn {
+      background: var(--cyan);
+      color: #00131a;
+      border: none;
+      padding: 0 20px;
+      border-radius: var(--radius-md);
+      font-weight: 700;
+      cursor: pointer;
+      transition: var(--transition);
+      white-space: nowrap;
+    }
+
+    #createBtn:hover {
+      filter: brightness(1.08);
+      transform: translateY(-1px);
+    }
+
+    .project-card {
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius-lg);
+      display: flex;
+      overflow: hidden;
+      transition: var(--transition);
+      cursor: pointer;
+      position: relative;
+    }
+
+    .project-card:hover {
+      transform: translateX(8px);
+      border-color: rgba(34, 211, 238, 0.3);
+      box-shadow: var(--shadow);
+    }
+
+    .image-container {
+      width: 240px;
+      height: 152px;
+      position: relative;
+      flex-shrink: 0;
+      overflow: hidden;
+      background: #0f172a;
+    }
+
+    .project-image {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: var(--transition);
+    }
+
+    .project-card:hover .project-image { transform: scale(1.05); }
+
+    .project-card__badge {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.62);
+      backdrop-filter: blur(4px);
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--cyan-glow);
+      z-index: 2;
+    }
+
+    .info-container {
+      flex: 1;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-width: 0;
+    }
+
+    .info-top { display: flex; flex-direction: column; gap: 6px; }
+
+    .project-card .title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+      margin: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .works-count {
+      font-size: 13px;
+      color: var(--muted);
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .textme { color: var(--cyan); font-weight: 600; }
+
+    .info-bottom {
+      display: flex;
+      gap: 22px;
+      margin-top: 12px;
+      padding-top: 11px;
+      border-top: 1px solid var(--panel-border);
+      flex-wrap: wrap;
+    }
+
+    .timestamp {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .empty {
+      border: 1px dashed var(--panel-border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      text-align: center;
+      color: var(--muted);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .footer-info {
+      margin-top: 26px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 0 10px;
+      flex-wrap: wrap;
+    }
+
+    #status {
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #status::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      background: var(--ok);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--ok);
+    }
+
+    #status.err::before {
+      background: var(--err);
+      box-shadow: 0 0 8px var(--err);
+    }
+
+    @media (max-width: 768px) {
+      .header { flex-direction: column; align-items: flex-start; }
+      .search-area { width: 100%; }
+      .search-input-wrap { width: 100%; }
+      .project-card { flex-direction: column; }
+      .image-container { width: 100%; height: 170px; }
+      .info-bottom { flex-direction: column; gap: 4px; }
+      .create-form-row { flex-direction: column; }
+      #createBtn { height: 40px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="title-area">
+        <h1>Grok Drama</h1>
+        <p>AI 漫剧创作工作台 · 项目管理中心</p>
+      </div>
+      <div class="search-area">
+        <div class="search-input-wrap">
+          <input id="projectInput" placeholder="搜索项目名称..." />
+        </div>
+        <button class="btn-icon" id="refreshBtn" title="刷新项目库" type="button" aria-label="刷新项目库">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+        </button>
+      </div>
+    </header>
+
+    <select id="projectSelect"></select>
+    <button id="loadBtn" type="button"></button>
+    <div id="quickList"></div>
+
+    <div class="project-list" id="recentList">
+      <div class="create-card" id="createCard" role="button" tabindex="0">
+        <div class="create-content">
+          <div class="create-icon">+</div>
+          <span>创建新项目</span>
+        </div>
+      </div>
+
+      <div class="create-form" id="createForm">
+        <div style="margin-bottom:12px;font-size:13px;color:var(--muted);">请输入项目显示名称（可中文），目录会自动转为英文安全名：</div>
+        <div class="create-form-row">
+          <input id="createInput" placeholder="例如：第二集（目录将自动转为英文安全名）" />
+          <button id="createBtn" type="button">立即创建</button>
+        </div>
+      </div>
+
+      <div class="empty" id="emptyNotice">正在加载项目列表...</div>
+    </div>
+
+    <footer class="footer-info">
+      <div id="status">准备就绪</div>
+      <div style="font-size:12px;color:var(--muted);">Grok Drama v2.0 · Powered by AI</div>
+    </footer>
+  </div>
+
+  <script>
+    const DEFAULT_PROJECT_FALLBACK = 'episode-1-20260320-113900';
+    const PROJECT_INDEX_STORAGE_KEY = 'grok_storyboard_project_index_v1';
+    const PROJECT_ALIAS_STORAGE_KEY = 'grok_storyboard_project_alias_v1';
+    const FLASHBACK_PAGE = './zhihe-storyboard-preview-flashback.html';
+    const COVER_POOL = [
+      'https://images.unsplash.com/photo-1516117172878-fd2c41f4a759?auto=format&fit=crop&w=900&q=60',
+      'https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60',
+      'https://images.unsplash.com/photo-1470770903676-69b98201ea1c?auto=format&fit=crop&w=900&q=60',
+      'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60',
+      'https://images.unsplash.com/photo-1518837695005-2083093ee35b?auto=format&fit=crop&w=900&q=60'
+    ];
+
+    const q = (id) => document.getElementById(id);
+    const nowUrl = new URL(window.location.href);
+    let allProjectRows = [];
+
+    function setStatus(text, ok = true){
+      const el = q('status');
+      if(!el) return;
+      el.textContent = text;
+      el.classList.toggle('err', !ok);
+    }
+
+    function readProjectIndexLocal(){
+      try{
+        const raw = localStorage.getItem(PROJECT_INDEX_STORAGE_KEY);
+        const data = raw ? JSON.parse(raw) : null;
+        const arr = Array.isArray(data?.projects) ? data.projects : (Array.isArray(data) ? data : []);
+        return [...new Set(arr.map(x => String(x || '').trim()).filter(Boolean))];
+      } catch { return []; }
+    }
+
+    function saveProjectIndexLocal(names = []){
+      try{
+        const uniq = [...new Set((names || []).map(x => String(x || '').trim()).filter(Boolean))];
+        localStorage.setItem(PROJECT_INDEX_STORAGE_KEY, JSON.stringify({ updatedAt: new Date().toISOString(), projects: uniq }));
+        return uniq;
+      } catch { return []; }
+    }
+
+    function readProjectAliasMap(){
+      try{
+        const raw = localStorage.getItem(PROJECT_ALIAS_STORAGE_KEY);
+        const data = raw ? JSON.parse(raw) : {};
+        if(!data || typeof data !== 'object' || Array.isArray(data)) return {};
+        const out = {};
+        Object.entries(data).forEach(([k,v])=>{
+          const key = String(k || '').trim();
+          const val = String(v || '').trim();
+          if(key && val) out[key] = val;
+        });
+        return out;
+      } catch { return {}; }
+    }
+
+    function saveProjectAliasMap(map = {}){
+      try{
+        localStorage.setItem(PROJECT_ALIAS_STORAGE_KEY, JSON.stringify(map || {}));
+      } catch {}
+    }
+
+    function setProjectAlias(project, alias){
+      const p = String(project || '').trim();
+      const a = String(alias || '').trim();
+      if(!p || !a || p === a) return;
+      const map = readProjectAliasMap();
+      map[p] = a;
+      saveProjectAliasMap(map);
+    }
+
+    function getProjectAlias(project){
+      const p = String(project || '').trim();
+      if(!p) return '';
+      const map = readProjectAliasMap();
+      return String(map[p] || '').trim();
+    }
+
+    function makeSafeProjectFolder(raw){
+      const src = String(raw || '').trim();
+      const safe = src
+        .replace(/\s+/g, '-')
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .replace(/-+/g, '-')
+        .replace(/^[-_]+|[-_]+$/g, '');
+      if(safe) return safe;
+      const d = new Date();
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mi = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `episode-${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+    }
+
+    function escapeHtml(s){
+      return String(s || '').replace(/[&<>"']/g, (m)=>({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[m]));
+    }
+
+    function getBridgeBase(){
+      // Embedded gateway serves everything from one origin.
+      try { return location.origin.replace(/\/$/, ''); } catch { return 'http://127.0.0.1:12733'; }
+    }
+
+    function formatTs(ts){
+      if(!ts) return '—';
+      try {
+        return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+      } catch { return String(ts); }
+    }
+
+    function getCurrentProject(){
+      return String(q('projectInput')?.value || q('projectSelect')?.value || '').trim();
+    }
+
+    function buildWorkspaceUrl(project){
+      const u = new URL(FLASHBACK_PAGE, window.location.href);
+      u.searchParams.set('project', project);
+      ['chatBase','chatPath','chatModel','chatKey'].forEach((k)=>{
+        const v = String(nowUrl.searchParams.get(k) || '').trim();
+        if(v) u.searchParams.set(k, v);
+      });
+      return u.toString();
+    }
+
+    function fillProjectSelect(names = [], active = ''){
+      const sel = q('projectSelect');
+      const uniq = [...new Set((names || []).map(x => String(x || '').trim()).filter(Boolean))];
+      if(!uniq.length) uniq.push(DEFAULT_PROJECT_FALLBACK);
+      if(sel){
+        sel.innerHTML = '';
+        uniq.forEach(name => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = name;
+          sel.appendChild(opt);
+        });
+        const pick = String(active || '').trim();
+        sel.value = uniq.includes(pick) ? pick : uniq[0];
+      }
+      return uniq;
+    }
+
+    function goWorkspace(project){
+      const p = String(project || '').trim();
+      if(!p){
+        setStatus('请先输入或选择项目名', false);
+        q('projectInput')?.focus?.();
+        return;
+      }
+      const local = readProjectIndexLocal();
+      saveProjectIndexLocal([p, ...local]);
+      window.location.href = buildWorkspaceUrl(p);
+    }
+
+    function createProject(){
+      const raw = String(q('createInput')?.value || q('projectInput')?.value || '').trim();
+      if(!raw){
+        setStatus('请先输入项目名，例如 第二集', false);
+        q('createInput')?.focus?.();
+        return;
+      }
+      const folderProject = makeSafeProjectFolder(raw);
+      setProjectAlias(folderProject, raw);
+      goWorkspace(folderProject);
+    }
+
+    function coverByName(name){
+      let hash = 0;
+      for(let i = 0; i < name.length; i++) hash = ((hash << 5) - hash) + name.charCodeAt(i);
+      const idx = Math.abs(hash) % COVER_POOL.length;
+      return COVER_POOL[idx];
+    }
+
+    function renderCards(projectRows = [], keyword = ''){
+      const wrap = q('recentList');
+      const empty = q('emptyNotice');
+      if(!wrap) return;
+      const cards = Array.isArray(projectRows) ? projectRows : [];
+      const kw = String(keyword || '').trim().toLowerCase();
+      const sourceRows = cards.length ? cards : allProjectRows;
+      const filtered = kw ? sourceRows.filter(r => String(r.name || '').toLowerCase().includes(kw)) : sourceRows;
+
+      document.querySelectorAll('.project-card.dynamic').forEach((el)=>el.remove());
+      if(filtered.length === 0){
+        if(empty){
+          empty.style.display = 'block';
+          empty.textContent = sourceRows.length ? '没有匹配的项目' : '暂无项目，先创建一个吧';
+        }
+        return;
+      }
+      if(empty) empty.style.display = 'none';
+
+      const createForm = q('createForm');
+      const anchor = createForm?.nextSibling;
+      filtered.forEach((row)=>{
+        const el = document.createElement('div');
+        el.className = 'project-card dynamic';
+        el.dataset.project = row.name;
+        const alias = getProjectAlias(row.name);
+        const titleText = alias || row.name;
+        const folderMeta = alias ? `<p class="timestamp">目录：${escapeHtml(row.name)}</p>` : '';
+        el.innerHTML = `
+          <div class="image-container">
+            <span class="project-card__badge">Ai漫剧</span>
+            <img src="${row.cover}" alt="项目封面" class="project-image" />
+          </div>
+          <div class="info-container">
+            <div class="info-top">
+              <h4 class="title">${escapeHtml(titleText)}</h4>
+              ${folderMeta}
+              <p class="works-count">分镜：${row.scenes}</p>
+              <p class="works-count">项目归属：<span class="textme">我(local)</span></p>
+            </div>
+            <div class="info-bottom">
+              <p class="timestamp">更新时间：${formatTs(row.updatedAt)}</p>
+              <p class="timestamp">创建时间：${formatTs(row.createdAt)}</p>
+            </div>
+          </div>
+        `;
+        el.addEventListener('click', ()=> goWorkspace(row.name));
+        wrap.appendChild(el);
+      });
+    }
+
+    async function discoverProjects(forceRefresh = false){
+      const bridgeBase = getBridgeBase();
+      let names = [];
+      let rows = [];
+      let source = 'local';
+      const localNames = readProjectIndexLocal();
+      try{
+        const route = forceRefresh ? '/api/projects?refresh=1' : '/api/projects';
+        const resp = await fetch(`${bridgeBase}${route}`);
+        if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const apiNames = Array.isArray(data?.projects) ? data.projects : [];
+        names = [...new Set([...apiNames, ...localNames])];
+        const projects = Array.isArray(data?.projectRows) ? data.projectRows : [];
+        rows = projects.length ? projects.map((p)=>({
+          name: String(p?.name || '').trim(),
+          updatedAt: p?.updatedAt || p?.mtime || '',
+          createdAt: p?.createdAt || p?.ctime || p?.updatedAt || '',
+          scenes: Number.isFinite(Number(p?.scenes)) ? Number(p?.scenes) : 0,
+          cover: String(p?.cover || '').trim() || coverByName(String(p?.name || ''))
+        })).filter(p=>p.name) : names.map((n)=>({
+          name: n,
+          updatedAt: '',
+          createdAt: '',
+          scenes: 0,
+          cover: coverByName(n)
+        }));
+        source = data?.source || 'api';
+      } catch(err){
+        names = localNames;
+        rows = names.map((n)=>({ name: n, updatedAt: '', createdAt: '', scenes: 0, cover: coverByName(n) }));
+        setStatus(`项目接口不可用，已使用本地索引（${err.message}）`, false);
+      }
+
+      const uniq = fillProjectSelect(names, getCurrentProject());
+      saveProjectIndexLocal(uniq);
+      const map = new Map(rows.map(r => [r.name, r]));
+      const merged = uniq.map((n)=> map.get(n) || { name:n, updatedAt:'', createdAt:'', scenes:0, cover: coverByName(n) });
+      allProjectRows = merged;
+      renderCards(allProjectRows, q('projectInput')?.value || '');
+      if(source !== 'local') setStatus(`已加载 ${uniq.length} 个项目（${source}）`, true);
+      return merged;
+    }
+
+    function toggleCreateForm(){
+      const form = q('createForm');
+      if(!form) return;
+      const open = form.style.display === 'block';
+      form.style.display = open ? 'none' : 'block';
+      if(!open) q('createInput')?.focus?.();
+    }
+
+    (function init(){
+      q('createCard')?.addEventListener('click', toggleCreateForm);
+      q('createCard')?.addEventListener('keydown', (e)=>{
+        if(e.key === 'Enter' || e.key === ' '){
+          e.preventDefault();
+          toggleCreateForm();
+        }
+      });
+
+      q('projectInput')?.addEventListener('keydown', (e)=>{
+        if(e.key === 'Enter'){
+          e.preventDefault();
+          goWorkspace(getCurrentProject());
+        }
+      });
+
+      q('projectInput')?.addEventListener('input', ()=>{
+        const kw = String(q('projectInput')?.value || '').trim();
+        renderCards(allProjectRows, kw);
+      });
+
+      q('createInput')?.addEventListener('keydown', (e)=>{
+        if(e.key === 'Enter'){
+          e.preventDefault();
+          createProject();
+        }
+      });
+
+      q('createBtn')?.addEventListener('click', createProject);
+      q('refreshBtn')?.addEventListener('click', ()=> discoverProjects(true));
+      q('loadBtn')?.addEventListener('click', ()=> goWorkspace(getCurrentProject()));
+
+      const initProject = String(nowUrl.searchParams.get('project') || '').trim();
+      if(initProject && q('projectInput')) q('projectInput').value = initProject;
+      discoverProjects(false);
+    })();
+  </script>
+</body>
+</html>

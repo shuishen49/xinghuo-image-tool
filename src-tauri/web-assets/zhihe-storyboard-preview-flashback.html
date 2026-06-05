@@ -1,0 +1,1634 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grok Drama｜剧情分段与提示词预览</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --bg: #111318;
+      --panel: #191A1E;
+      --line: rgba(255,255,255,.12);
+      --text: rgba(255,255,255,.9);
+      --muted: rgba(255,255,255,.6);
+      --cyan: #00FFCC;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+    .app-shell {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+      gap: 12px;
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 12px;
+      align-items: flex-start;
+      overflow-x: hidden;
+    }
+    .main-pane { flex: 1 1 auto; min-width: 0; width: 0; overflow: hidden; }
+    .wrap { width: 100%; min-width: 0; max-width: none; margin: 0; padding: 0; }
+    .chat-pane {
+      flex: 0 0 clamp(320px, 32vw, 400px);
+      width: clamp(320px, 32vw, 400px);
+      min-width: 320px;
+      max-width: 400px;
+      margin-left: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 24px);
+      position: sticky;
+      top: 12px;
+      overflow: hidden;
+    }
+    .chat-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .chat-head-main { min-width:0; flex:1 1 auto; }
+    .chat-pane-toggle {
+      flex: 0 0 auto;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 6px 10px;
+      line-height: 1;
+    }
+    .chat-pane-toggle:hover { background: rgba(255,255,255,.16); }
+    .chat-title { font-size: 15px; font-weight: 700; }
+    .chat-sub { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .chat-pane-hidden { display:none !important; }
+    .chat-pane-dock {
+      position: fixed;
+      right: 14px;
+      top: 14px;
+      z-index: 80;
+      display: none;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: #1f2430;
+      color: #f8fafc;
+      font-size: 12px;
+      padding: 8px 12px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.35);
+    }
+    body.chat-pane-collapsed .chat-pane-dock { display: inline-flex; align-items:center; gap:6px; }
+    body.chat-pane-collapsed .app-shell {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
+    }
+    body.chat-pane-collapsed .main-pane {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: 0;
+    }
+    body.chat-pane-collapsed .wrap { max-width: 2400px; }  
+
+    @media (max-width: 1500px) {
+      body.chat-pane-collapsed .chat-pane-dock { top: 10px; right: 10px; }
+    }   
+
+    @media (max-width: 560px) {
+      .app-shell {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+      }
+      .main-pane {
+        flex: 1 1 auto;
+        min-width: 0;
+        width: 0;
+      }
+      .chat-pane {
+        flex: 0 0 clamp(320px, 32vw, 400px);
+        width: clamp(320px, 32vw, 400px);
+        min-width: 320px;
+        max-width: 400px;
+        margin-left: auto;
+        height: calc(100vh - 24px);
+        position: sticky;
+        top: 12px;
+      }
+    }  
+    .chat-messages { flex: 1 1 auto; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .msg { max-width: 92%; padding: 10px 12px; border-radius: 12px; line-height: 1.45; font-size: 13px; word-break: break-word; overflow-wrap: anywhere; }
+    .msg.user { align-self: flex-end; background: rgba(0,255,204,.16); border: 1px solid rgba(0,255,204,.35); white-space: pre-wrap; }
+    .msg.bot { align-self: flex-start; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.16); white-space: normal; }
+    .md-content p { margin: 0 0 8px; }
+    .md-content p:last-child { margin-bottom: 0; }
+    .md-content h1, .md-content h2, .md-content h3, .md-content h4 { margin: 4px 0 8px; line-height: 1.3; }
+    .md-content h1 { font-size: 18px; }
+    .md-content h2 { font-size: 16px; }
+    .md-content h3 { font-size: 15px; }
+    .md-content h4 { font-size: 14px; }
+    .md-content ul, .md-content ol { margin: 6px 0 8px 18px; padding: 0; }
+    .md-content li { margin: 2px 0; }
+    .md-content blockquote { margin: 6px 0; padding: 6px 10px; border-left: 3px solid rgba(255,255,255,.28); background: rgba(255,255,255,.04); border-radius: 6px; color: rgba(255,255,255,.88); }
+    .md-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.16); padding: 1px 5px; border-radius: 6px; }
+    .md-content pre { margin: 8px 0; padding: 10px; border-radius: 10px; background: rgba(0,0,0,.34); border: 1px solid rgba(255,255,255,.14); overflow: auto; }
+    .md-content pre code { background: transparent; border: 0; padding: 0; border-radius: 0; display: block; white-space: pre; }
+    .md-content a { color: #7dd3fc; text-decoration: underline; }
+    .md-content hr { border: 0; border-top: 1px solid rgba(255,255,255,.2); margin: 8px 0; }
+    .chat-input-wrap { border-top: 1px solid var(--line); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .chat-input { width: 100%; min-height: 86px; max-height: 220px; resize: vertical; }
+    .chat-actions { display: flex; justify-content: space-between; gap: 8px; }
+    .chat-actions .left, .chat-actions .right { display: flex; gap: 8px; }
+    .chat-config { padding: 10px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+    .chat-config-row { display: flex; gap: 8px; }
+    .chat-config-row > * { flex: 1 1 0; min-width: 0; }
+    .chat-config summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+    .chat-hint { font-size: 12px; color: var(--muted); }
+    .chat-status { font-size: 12px; color: var(--muted); min-height: 18px; }
+    .chat-status.ok { color: #34d399; }
+    .chat-status.err { color: #f87171; }
+    .chat-send[disabled] { opacity: .55; cursor: not-allowed; }
+
+    @media (max-width: 560px) {
+      .app-shell {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+      }
+      .main-pane {
+        flex: 1 1 auto;
+        min-width: 0;
+        width: 0;
+      }
+      .chat-pane {
+        flex: 0 0 clamp(320px, 32vw, 400px);
+        width: clamp(320px, 32vw, 400px);
+        min-width: 320px;
+        max-width: 400px;
+        margin-left: auto;
+        height: calc(100vh - 24px);
+        position: sticky;
+        top: 12px;
+      }
+    }
+    .title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-start;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .title { font-size: 20px; font-weight: 700; margin: 0; }
+    .title-entry-btn {
+      flex: 0 0 auto;
+      border-radius: 10px;
+      padding: 7px 12px;
+      border: 1px solid rgba(45,212,191,.35);
+      background: rgba(13,148,136,.14);
+      color: #99f6e4;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .title-entry-btn:hover {
+      background: rgba(13,148,136,.24);
+      border-color: rgba(45,212,191,.55);
+    }
+    .sub { color: var(--muted); margin-bottom: 10px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .project-home {
+      margin-bottom: 12px;
+      border: 1px solid rgba(34,211,238,.24);
+      background: linear-gradient(160deg, rgba(15,23,42,.86), rgba(2,6,23,.9));
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: 0 10px 26px rgba(2,6,23,.35), inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .project-home-hero { margin-bottom: 12px; }
+    .project-home-title { font-size: 16px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
+    .project-home-sub { font-size: 12px; color: #93c5fd; }
+    .project-home-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .project-home-card {
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15,23,42,.55);
+    }
+    .project-home-card-title { font-size: 14px; font-weight: 700; color: #e5e7eb; margin-bottom: 4px; }
+    .project-home-card-sub { font-size: 12px; color: #93c5fd; margin-bottom: 10px; }
+    .project-home-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .project-home-quick { margin-top: 6px; display: flex; align-items: flex-start; gap: 10px; }
+    .project-home-current { margin-top: 8px; }
+
+    .workspace-shell { display: none; }
+    .workspace-shell.active { display: block; }
+    .workspace-project-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid rgba(45,212,191,.26);
+      border-radius: 12px;
+      background: rgba(13,148,136,.1);
+    }
+    .workspace-project-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .project-switcher-current {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(45,212,191,.35);
+      background: rgba(13,148,136,.12);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: #99f6e4;
+      max-width: min(70vw, 420px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    select, input, button {
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.16);
+      color: #fff;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    #projectSelect { min-width: 220px; max-width: 320px; }
+    #projectInput, #projectCreateInput { min-width: 280px; flex: 1 1 320px; }
+
+    .project-quick-list {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      flex: 1 1 auto;
+    }
+    .project-quick-btn {
+      border: 1px solid rgba(148,163,184,.38);
+      background: rgba(30,41,59,.7);
+      color: #e2e8f0;
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      line-height: 1.2;
+      cursor: pointer;
+      transition: all .15s ease;
+      max-width: min(55vw, 360px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .project-quick-btn:hover {
+      border-color: rgba(45,212,191,.7);
+      color: #ccfbf1;
+      background: rgba(13,148,136,.22);
+      transform: translateY(-1px);
+    }
+    .project-quick-btn.active {
+      border-color: rgba(0,255,204,.82);
+      box-shadow: 0 0 0 1px rgba(0,255,204,.28) inset;
+      color: #00ffcc;
+      background: rgba(0,255,204,.12);
+    }
+    .project-switcher-status { margin-top: 10px; display: flex; justify-content: flex-end; }
+    .project-switcher-status .meta { margin: 0; }
+
+    @media (max-width: 720px) {
+      .project-home-grid { grid-template-columns: 1fr; }
+      #projectSelect, #projectInput, #projectCreateInput { min-width: 100%; max-width: 100%; }
+      .project-home-row { flex-wrap: wrap; }
+      .project-home-quick { flex-wrap: wrap; }
+      .workspace-project-bar { flex-wrap: wrap; }
+      .project-switcher-status { justify-content: flex-start; }
+    }
+    @media (max-width: 640px) {
+      .project-home { padding: 10px; border-radius: 14px; }
+      .project-switcher-current { max-width: 100%; }
+      .project-quick-btn { max-width: 100%; }
+    }
+    select {
+      background-color: #1a2230;
+      color: #f8fafc;
+      border-color: rgba(148,163,184,.45);
+    }
+    select option {
+      background-color: #1a2230;
+      color: #f8fafc;
+    }
+    select:focus {
+      outline: none;
+      border-color: #22d3ee;
+      box-shadow: 0 0 0 2px rgba(34,211,238,.22);
+    }
+    button { cursor: pointer; }
+    button:hover { background: rgba(255,255,255,.12); }
+    .ok { color: #34d399; }
+    .err { color: #f87171; }
+    .panel { background: var(--panel); border-radius: 18px; padding: 10px; border: 1px solid var(--line); }
+    .table-top-scroll {
+      display: none;
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: 14px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.12);
+    }
+    .table-top-scroll-inner { height: 1px; }
+    .table-wrap { overflow: auto; max-height: 82vh; }
+    table { width: 100%; border-collapse: collapse; min-width: 2140px; }
+    thead th { position: sticky; top: 0; background: var(--panel); z-index: 5; color: var(--muted); border-bottom: 1px solid var(--line); }
+    th, td { border-bottom: 1px solid rgba(255,255,255,.08); padding: 10px; vertical-align: top; }
+    th:nth-child(1), td:nth-child(1) { width: 60px; text-align: center; }
+    /* 序号列固定在最左侧，不受横向滚动影响 */
+    #storyboardMainTable th:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 8;
+      background: var(--panel);
+      box-shadow: 1px 0 0 rgba(255,255,255,.08);
+    }
+    #storyboardMainTable td:first-child {
+      position: sticky;
+      left: 0;
+      z-index: 4;
+      background: #12151d;
+      box-shadow: 1px 0 0 rgba(255,255,255,.08);
+    }
+    #storyboardMainTable tbody tr:hover td:first-child {
+      background: #171b24;
+    }
+    th:nth-child(2), td:nth-child(2) { min-width: 340px; }
+    th:nth-child(3), td:nth-child(3) { min-width: 220px; }
+    th:nth-child(4), td:nth-child(4) { min-width: 320px; }
+    th:nth-child(5), td:nth-child(5) { width: 96px; min-width: 96px; text-align: center; }
+    th:nth-child(6), td:nth-child(6) { width: 170px; min-width: 170px; text-align: center; }
+    th:nth-child(7), td:nth-child(7) { min-width: 380px; }
+    th:nth-child(8), td:nth-child(8) { width: 90px; text-align: center; }
+    th:nth-child(9), td:nth-child(9) { width: 240px; }
+    .scene-summary-card {
+      min-height: 140px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(59,130,246,.24);
+      background: linear-gradient(135deg, rgba(59,130,246,.12), rgba(15,23,42,.42));
+      color: rgba(255,255,255,.9);
+      line-height: 1.55;
+      font-size: 13px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+      overflow: auto;
+    }
+    .scene-summary-card .scene-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+      color: #bfdbfe;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .scene-summary-card .scene-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    textarea {
+      width: 100%; min-height: 140px; max-height: 420px; resize: vertical;
+      background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.15);
+      color: rgba(255,255,255,.92); border-radius: 10px; padding: 10px; line-height: 1.5; font-size: 13px;
+    }
+    .cast-slot-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      width: 132px;
+    }
+    .cast-add-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 10px;
+      border: 2px dashed rgba(255,255,255,.22);
+      background: transparent;
+      color: rgba(255,255,255,.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all .15s ease;
+    }
+    .cast-add-btn:hover {
+      background: rgba(255,255,255,.06);
+      border-color: rgba(255,255,255,.45);
+      color: rgba(255,255,255,.85);
+    }
+    .cast-person-chip {
+      width: 56px;
+      height: 56px;
+      border-radius: 10px;
+      border: 1px solid rgba(34,211,238,.55);
+      background: rgba(34,211,238,.12);
+      color: #d1fae5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      padding: 4px;
+      overflow: hidden;
+    }
+    .cast-person-chip span { font-size: 12px; font-weight: 700; line-height: 1; }
+    .cast-person-chip small { font-size: 10px; line-height: 1.1; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cast-person-chip-wrap { position: relative; width: 56px; height: 56px; }
+    .cast-person-chip-photo { width: 56px; height: 56px; padding: 0; gap: 0; position: relative; overflow: hidden; border-color: rgba(255,255,255,.2); background: rgba(0,0,0,.24); }
+    .cast-person-chip-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .cast-person-chip-photo small {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,.58);
+      padding: 2px 4px;
+      font-size: 9px;
+    }
+    .cast-person-remove {
+      position: absolute;
+      right: -6px;
+      top: -6px;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: rgba(127,29,29,.88);
+      color: #fff;
+      font-size: 12px;
+      line-height: 1;
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .segment-cast-modal { position: fixed; inset: 0; background: rgba(0,0,0,.74); backdrop-filter: blur(3px); display: none; align-items: center; justify-content: center; z-index: 10060; padding: 16px; }
+    .segment-cast-modal.show { display: flex; }
+    .segment-cast-dialog {
+      width: min(1120px, 98vw);
+      max-height: 90vh;
+      overflow: hidden;
+      background: #14161c;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 16px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,.35), 0 8px 10px -6px rgba(0,0,0,.35);
+      display: flex;
+      flex-direction: column;
+    }
+    .segment-cast-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.02);
+      display:flex;
+      justify-content: space-between;
+      align-items:center;
+      gap:10px;
+    }
+    .segment-cast-title { font-weight: 800; font-size: 18px; color: #22d3ee; letter-spacing: -0.02em; }
+    .segment-cast-body { padding: 20px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+    .segment-cast-manual {
+      border: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.03);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .segment-cast-manual-row { display:flex; gap:10px; align-items:center; flex-wrap: wrap; margin-top: 8px; }
+    .segment-cast-manual-row input { flex: 1 1 auto; min-width: 0; background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.14); color: #fff; }
+
+    .segment-cast-global-picker { margin-top: 14px; border-top: 1px solid rgba(255,255,255,.1); padding-top: 14px; }
+    .segment-cast-global-picker summary { cursor: pointer; font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+    .segment-cast-global-top { display:flex; align-items:center; gap:8px; justify-content: space-between; margin-bottom: 10px; }
+    .segment-cast-global-item { display:flex; align-items:center; gap:6px; font-size: 12px; color: rgba(255,255,255,.86); }
+
+    .segment-cast-global-table-wrap {
+      max-height: 200px;
+      overflow: auto;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+    }
+    .segment-cast-global-table { width: 100%; border-collapse: collapse; min-width: 560px; font-size: 13px; }
+    .segment-cast-global-table th {
+      position: sticky;
+      top: 0;
+      background: #1c1f26;
+      z-index: 1;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.14);
+      text-align: left;
+      color: #94a3b8;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .segment-cast-global-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      text-align: left;
+      vertical-align: middle;
+    }
+    .segment-cast-row:hover td { background: rgba(255,255,255,.04); }
+    .segment-cast-avatar { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,.2); background: #000; }
+    .cast-upload-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+      background: rgba(34,211,238,.12); color: #67e8f9; border: 1px dashed rgba(34,211,238,.4);
+      cursor: pointer; transition: all .15s; white-space: nowrap;
+    }
+    .cast-upload-btn:hover { background: rgba(34,211,238,.22); border-color: rgba(34,211,238,.7); color: #a5f3fc; }
+
+    .segment-cast-foot {
+      padding: 14px 20px;
+      border-top: 1px solid rgba(255,255,255,.1);
+      background: rgba(0,0,0,.12);
+      display:flex;
+      justify-content: space-between;
+      align-items:center;
+      gap:8px;
+    }
+
+    /* 视频生成弹窗（精致版） */
+    .video-gen-dialog {
+      width: min(100%, 1320px);
+      max-height: 96vh;
+      display: flex;
+      flex-direction: column;
+      background: #14161c;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 16px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,.35), 0 8px 10px -6px rgba(0,0,0,.35);
+      overflow: hidden;
+      animation: videoGenModalIn .24s ease-out;
+    }
+    @keyframes videoGenModalIn {
+      from { opacity: 0; transform: scale(.985) translateY(8px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .video-gen-head {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.02);
+      gap: 12px;
+    }
+    .video-gen-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #22d3ee;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .video-gen-title::before { content: '🎬'; font-size: 18px; }
+    .video-gen-body {
+      flex: 1;
+      min-height: 0;
+      padding: 22px;
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 22px;
+      overflow: hidden;
+    }
+    .video-gen-preview {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      gap: 10px;
+    }
+    .video-gen-section-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+    .video-gen-image-box {
+      flex: 1;
+      min-height: 200px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(0,0,0,.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .video-gen-image-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    #videoGenPreviewImageBox img {
+      width: 50%;
+      height: 50%;
+      object-fit: contain;
+    }
+    #videoGenTailImageBox img {
+      width: 50%;
+      height: 50%;
+      object-fit: contain;
+    }
+    .video-gen-empty {
+      color: rgba(148,163,184,.9);
+      font-size: 12px;
+      text-align: center;
+      padding: 0 14px;
+      line-height: 1.6;
+    }
+    .video-gen-add-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: rgba(148,163,184,.85);
+      font-size: 12px;
+      width: 100%;
+      height: 100%;
+      transition: background-color .15s ease, color .15s ease;
+    }
+    .video-gen-add-placeholder .plus-icon {
+      font-size: 42px;
+      line-height: 1;
+      font-weight: 300;
+      color: rgba(34,211,238,.55);
+    }
+    .video-gen-image-box:hover .video-gen-add-placeholder {
+      background: rgba(34,211,238,.06);
+      color: rgba(226,232,240,.95);
+    }
+    .video-gen-image-box:hover .video-gen-add-placeholder .plus-icon {
+      color: rgba(34,211,238,.95);
+    }
+    .history-wrap {
+      margin-top: 14px;
+      border-top: 1px solid rgba(255,255,255,.1);
+      padding-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+    }
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .history-item {
+      padding: 18px 14px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: rgba(255,255,255,.02);
+      transition: all .2s ease;
+      min-height: 82px;
+    }
+    .history-item:hover {
+      border-color: rgba(255,255,255,.24);
+      background: rgba(255,255,255,.04);
+    }
+    .history-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      gap: 8px;
+    }
+    .history-tag {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: rgba(255,255,255,.1);
+      color: #cbd5e1;
+    }
+    .history-tag.failed { color: #fecaca; background: rgba(239,68,68,.18); }
+    .video-link {
+      color: #22d3ee;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .video-link:hover { text-decoration: underline; }
+    .video-gen-config {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .video-gen-config-group { display: flex; flex-direction: column; gap: 12px; }
+    .video-gen-config-row {
+      display: grid;
+      grid-template-columns: 82px 1fr;
+      align-items: center;
+      gap: 12px;
+    }
+    .video-gen-config-row label.meta { margin: 0; color: #cbd5e1; font-weight: 600; font-size: 13px; }
+    .video-gen-config select,
+    .video-gen-config textarea,
+    .video-gen-config input[type="text"] {
+      background: #1c1f26;
+      border: 1px solid rgba(255,255,255,.15);
+      color: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      transition: all .2s ease;
+    }
+    .video-gen-config select:focus,
+    .video-gen-config textarea:focus {
+      outline: none;
+      border-color: #22d3ee;
+      box-shadow: 0 0 0 2px rgba(34,211,238,.25);
+    }
+    .video-gen-config textarea {
+      width: 100%;
+      min-height: 124px;
+      line-height: 1.6;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    .video-gen-foot {
+      padding: 16px 24px;
+      border-top: 1px solid rgba(255,255,255,.1);
+      background: rgba(0,0,0,.12);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .video-gen-actions { display: flex; gap: 12px; }
+    .video-gen-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      color: #dbeafe;
+    }
+    .video-gen-checkbox input[type="checkbox"] { accent-color: #22d3ee; }
+    .video-gen-optimize-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+      padding: 8px 10px;
+      border: 1px dashed rgba(34,211,238,.32);
+      border-radius: 10px;
+      background: rgba(34,211,238,.05);
+    }
+    .video-gen-optimize-bar label.meta { margin: 0; color: #cbd5e1; font-weight: 600; font-size: 12px; }
+    .video-gen-optimize-bar select { min-width: 168px; }
+    @media (max-width: 1100px) {
+      .video-gen-body { grid-template-columns: 1fr; overflow-y: auto; }
+      .video-gen-dialog { width: 96vw; height: 95vh; max-height: 95vh; }
+      .video-gen-foot { flex-direction: column; align-items: stretch; }
+      .video-gen-actions { justify-content: flex-end; }
+    }
+
+    .img-rule {
+      font-size: 12px; color: #fcd34d; background: rgba(245,158,11,.12);
+      border: 1px solid rgba(245,158,11,.35); border-radius: 10px; padding: 8px; margin-bottom: 8px;
+    }
+    .meta { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .character-panel { margin-bottom: 12px; padding: 14px; background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)); }
+    .outline-panel { margin-bottom: 12px; padding: 14px; background: linear-gradient(180deg, rgba(34,211,238,.08), rgba(255,255,255,.01)); border-color: rgba(34,211,238,.28); }
+    .outline-toolbar { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; padding-right:44px; }
+    .outline-title { font-size: 16px; font-weight: 800; margin: 0 0 4px; }
+    .outline-sub { color: var(--muted); font-size: 12px; }
+    .outline-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .outline-chip { font-size: 12px; color: rgba(255,255,255,.9); background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.16); border-radius: 999px; padding: 4px 10px; }
+    .outline-actions { display:flex; gap:8px; flex-wrap: wrap; }
+    .panel-toggle-btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .page-tabs { display:flex; gap:8px; flex-wrap:wrap; margin: 10px 0; }
+    .page-tab-btn {
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.04);
+      color: rgba(255,255,255,.86);
+      border-radius: 999px;
+      padding: 7px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .18s ease;
+    }
+    .page-tab-btn:hover { background: rgba(255,255,255,.1); }
+    .page-tab-btn.active {
+      background: rgba(37,99,235,.25);
+      border-color: rgba(96,165,250,.9);
+      color: #dbeafe;
+      box-shadow: inset 0 0 0 1px rgba(147,197,253,.35);
+    }
+    .panel-hidden { display: none !important; }
+    .panel-expanded { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb55, 0 8px 30px #00000055; }
+    .panel-overlay-mode {
+      position: fixed !important;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: min(1200px, 96vw);
+      max-height: 92vh;
+      overflow: auto;
+      z-index: 10051;
+      margin: 0;
+    }
+    .ui-blocker {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.68);
+      backdrop-filter: blur(2px);
+      display: none;
+      z-index: 10050;
+    }
+    .ui-blocker.show { display: block; }
+    body.panel-modal-open { overflow: hidden; }
+    .outline-text {
+      width: 100%; min-height: 150px; max-height: 360px; resize: vertical;
+      background: rgba(8,12,20,.55); border: 1px solid rgba(255,255,255,.14);
+      color: rgba(255,255,255,.92); border-radius: 12px; padding: 10px; line-height: 1.65; font-size: 13px;
+    }
+    .outline-panel.panel-overlay-mode .outline-text {
+      min-height: 62vh;
+      max-height: none;
+      resize: none;
+    }
+    .outline-zoom-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.78);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 10030;
+      padding: 18px;
+    }
+    .outline-zoom-overlay.show { display: flex; }
+    .outline-zoom-dialog {
+      width: min(1100px, 96vw);
+      height: min(88vh, 900px);
+      background: linear-gradient(180deg, #1a1e26, #141922);
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 18px;
+      box-shadow: 0 24px 64px rgba(0,0,0,.45);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .outline-zoom-head {
+      display:flex;
+      justify-content: space-between;
+      align-items:center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255,255,255,.12);
+    }
+    .outline-zoom-title { font-size: 14px; font-weight: 700; }
+    .outline-zoom-actions { display:flex; gap:8px; }
+    .outline-zoom-body { padding: 12px; flex: 1 1 auto; min-height: 0; }
+    .outline-zoom-text {
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
+      max-height: 100%;
+      resize: none;
+      background: rgba(8,12,20,.62);
+      border: 1px solid rgba(255,255,255,.16);
+      color: rgba(255,255,255,.96);
+      border-radius: 12px;
+      padding: 12px;
+      line-height: 1.72;
+      font-size: 15px;
+    }
+    .character-toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; padding-right:44px; }
+    .character-toolbar-left { min-width: 0; }
+    .character-toolbar-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+    .character-toolbar-meta { font-size: 12px; color: var(--muted); display:flex; flex-wrap:wrap; gap:10px; }
+    .character-toolbar-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-right:2px; }
+    .btn-primary {
+      background: linear-gradient(135deg, #00d9aa, #22d3ee);
+      color: #06231d;
+      border: 0;
+      font-weight: 700;
+      box-shadow: 0 8px 20px rgba(0,217,170,.28);
+    }
+    .btn-primary:hover { filter: brightness(1.05); }
+    .btn-ghost { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.16); }
+    .character-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .character-library-showcase {
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 16px;
+      background: linear-gradient(145deg, rgba(18,25,36,.88), rgba(10,16,24,.72));
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .character-library-head { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; margin-bottom: 10px; }
+    .character-library-title { font-size: 14px; font-weight: 700; }
+    .character-library-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .character-library-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
+    .library-card { border:1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 8px; background: rgba(255,255,255,.02); transition: all .18s ease; }
+    .library-card:hover { border-color: rgba(0,255,204,.55); transform: translateY(-1px); }
+    .library-card.in-project { border-color: rgba(0,255,204,.52); box-shadow: inset 0 0 0 1px rgba(0,255,204,.2); background: rgba(0,255,204,.08); }
+    .library-card-top { display:flex; gap:8px; align-items:flex-start; }
+    .library-card img { width: 46px; height: 62px; border-radius: 8px; object-fit: cover; border:1px solid rgba(255,255,255,.18); background:#0e1117; }
+    .library-card-name { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+    .library-card-role { font-size: 11px; color: var(--muted); }
+    .library-card-notes { margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.75); line-height: 1.45; max-height: 2.9em; overflow: hidden; }
+    .library-card-actions { margin-top: 8px; display:flex; gap:6px; }
+    .library-card-actions button { flex:1; font-size: 11px; padding: 5px 8px; }
+    .character-empty {
+      border: 1px dashed rgba(255,255,255,.22);
+      border-radius: 16px;
+      padding: 20px;
+      background: radial-gradient(circle at 20% 10%, rgba(0,255,204,.10), rgba(255,255,255,.02));
+    }
+    .character-empty-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+    .character-empty-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .character-card { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.1); border-radius: 16px; padding: 12px; }
+    .character-plan-card {
+      border: 1px solid rgba(34,211,238,.35);
+      background: linear-gradient(180deg, rgba(34,211,238,.08), rgba(255,255,255,.02));
+      border-radius: 14px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .character-plan-title { font-size: 14px; font-weight: 800; margin-bottom: 6px; }
+    .character-plan-list { margin: 0; padding-left: 18px; color: rgba(255,255,255,.9); }
+    .character-plan-list li { margin: 4px 0; }
+    .character-plan-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+    .character-source { display:inline-block; margin-left:8px; padding:2px 8px; font-size:11px; border-radius:999px; border:1px solid rgba(255,255,255,.2); color: rgba(255,255,255,.82); }
+    .character-source.global { border-color: rgba(0,255,204,.45); color: #5eead4; }
+    .character-source.project { border-color: rgba(147,197,253,.45); color: #93c5fd; }
+    .character-card-actions { display:flex; gap:8px; margin-top:10px; flex-wrap: wrap; }
+    .character-card-actions button { font-size:12px; padding:6px 10px; }
+    .character-name { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+    .character-role { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+    .character-row { display: grid; grid-template-columns: 92px minmax(220px, 360px) 1fr; gap: 14px; align-items: start; }
+    .character-preview { display: block; }
+    .character-preview img { width: 72px; height: 96px; object-fit: cover; border-radius: 10px; border: 1px solid rgba(255,255,255,.18); background: #0e1117; cursor: zoom-in; display: block; }
+    .character-notes { font-size: 13px; line-height: 1.6; color: rgba(255,255,255,.88); }
+    .character-prompt { min-width: 0; }
+    .character-card textarea { min-height: 120px; }
+
+    .character-picker-modal { position: fixed; inset: 0; background: rgba(0,0,0,.7); backdrop-filter: blur(2px); display: none; align-items: center; justify-content: center; z-index: 10020; padding: 18px; }
+    .character-picker-modal.show { display: flex; }
+    .character-picker-dialog { width: min(980px, 97vw); max-height: 88vh; background: linear-gradient(180deg, #1a1e26, #151922); border: 1px solid rgba(255,255,255,.14); border-radius: 20px; overflow: hidden; display:flex; flex-direction:column; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+    .character-picker-head { padding: 14px 16px 12px; border-bottom: 1px solid rgba(255,255,255,.1); }
+    .character-picker-title-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom: 6px; }
+    .character-picker-title { font-size: 17px; font-weight: 800; }
+    .character-picker-sub { font-size: 12px; color: var(--muted); }
+    .character-picker-top-actions { display:flex; gap:8px; align-items:center; }
+    .character-picker-filters { margin-top: 10px; display:flex; gap:8px; align-items:center; }
+    .character-picker-search { flex: 1 1 auto; min-width: 180px; }
+    .character-picker-chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); color: rgba(255,255,255,.84); background: rgba(255,255,255,.04); }
+    .character-picker-list { padding: 14px 16px; overflow: auto; display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .character-picker-item { position: relative; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; background: rgba(255,255,255,.02); padding: 10px; display:flex; gap:10px; cursor: pointer; transition: all .15s ease; }
+    .character-picker-item:hover { border-color: rgba(0,255,204,.45); transform: translateY(-1px); }
+    .character-picker-item.active { border-color: rgba(0,255,204,.62); box-shadow: 0 0 0 2px rgba(0,255,204,.18); background: rgba(0,255,204,.08); }
+    .character-picker-item img { width: 58px; height: 76px; object-fit: cover; border-radius: 8px; border: 1px solid rgba(255,255,255,.18); background: #0e1117; }
+    .character-picker-main { min-width: 0; }
+    .character-picker-name { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
+    .character-picker-role { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .character-picker-notes { font-size: 12px; color: rgba(255,255,255,.72); line-height: 1.45; max-height: 3.1em; overflow: hidden; }
+    .character-picker-check { position:absolute; right: 10px; top: 10px; width: 18px; height: 18px; border-radius: 999px; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.06); display:flex; align-items:center; justify-content:center; font-size: 11px; }
+    .character-picker-item.active .character-picker-check { border-color: rgba(0,255,204,.8); background: rgba(0,255,204,.16); color: #00ffcc; }
+    .character-picker-empty { border: 1px dashed rgba(255,255,255,.22); border-radius: 12px; padding: 18px; color: var(--muted); text-align: center; }
+    .character-picker-foot { padding: 12px 16px; border-top: 1px solid rgba(255,255,255,.1); display:flex; justify-content: space-between; align-items:center; gap:8px; }
+    .character-picker-foot .meta { margin: 0; }
+    .character-picker-foot-actions { display:flex; gap:8px; flex-wrap: wrap; }
+
+    .character-apply-modal { position: fixed; inset: 0; background: rgba(0,0,0,.72); display: none; align-items: center; justify-content: center; z-index: 10040; padding: 18px; }
+    .character-apply-modal.show { display: flex; }
+    .character-apply-dialog { width: min(860px, 96vw); max-height: 88vh; background: linear-gradient(180deg, #1a1e26, #141922); border: 1px solid rgba(255,255,255,.16); border-radius: 18px; overflow: hidden; display:flex; flex-direction: column; }
+    .character-apply-head { padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.12); }
+    .character-apply-title { font-size: 15px; font-weight: 800; }
+    .character-apply-sub { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .character-apply-list { padding: 12px; overflow: auto; display: grid; gap: 8px; }
+    .character-apply-item { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.03); }
+    .character-apply-item-top { display:flex; justify-content:space-between; gap:8px; margin-bottom: 6px; }
+    .character-apply-name { font-weight: 700; }
+    .character-apply-action { font-size: 12px; border-radius: 999px; padding: 2px 8px; border: 1px solid rgba(255,255,255,.2); }
+    .character-apply-action.add { color: #34d399; border-color: rgba(52,211,153,.5); }
+    .character-apply-action.overwrite { color: #fbbf24; border-color: rgba(251,191,36,.5); }
+    .character-apply-meta { font-size: 12px; color: var(--muted); line-height: 1.45; }
+    .character-apply-foot { padding: 12px 14px; border-top: 1px solid rgba(255,255,255,.12); display:flex; justify-content: space-between; align-items:center; gap:8px; }
+    .character-apply-actions { display:flex; gap:8px; }
+
+    @media (max-width: 720px) {
+      .character-toolbar { flex-direction: column; align-items: stretch; }
+      .character-row { grid-template-columns: 1fr; }
+      .character-picker-list { grid-template-columns: 1fr; }
+      .character-picker-title-row, .character-picker-filters, .character-picker-foot { flex-direction: column; align-items: stretch; }
+      .character-picker-top-actions { justify-content: flex-start; }
+      .character-library-grid { grid-template-columns: 1fr; }
+    }
+    .thumb { width: 68px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid rgba(255,255,255,.2); background: #0e1117; cursor: zoom-in; }
+    .shot-grid { display: grid; grid-template-columns: repeat(2, 56px); gap: 8px; justify-content: start; }
+    .shot-item { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 56px; }
+    .shot-btn { width: 56px; height: 56px; border-radius: 10px; overflow: hidden; border: 1px solid rgba(255,255,255,.18); cursor: zoom-in; transition: all .2s ease; display: block; }
+    .shot-btn:hover { border-color: #00FFCC; box-shadow: 0 0 0 2px rgba(0,255,204,.25); }
+    .shot-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .shot-label { font-size: 11px; color: rgba(255,255,255,.75); width: 56px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    a { color: #93c5fd; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.88); display: none; align-items: center; justify-content: center; z-index: 10120; }
+    .lightbox.show { display: flex; }
+    .lightbox-inner { position: relative; max-width: 96vw; max-height: 94vh; display: flex; align-items: center; justify-content: center; }
+    .lightbox img { max-width: 96vw; max-height: 94vh; object-fit: contain; border-radius: 8px; box-shadow: 0 12px 42px rgba(0,0,0,.45); }
+    .lb-btn { position: absolute; top: 12px; background: #111827cc; border: 1px solid #374151; color: #fff; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+    .lb-close { right: 12px; }
+    .lb-open { right: 70px; }
+    .lb-prev { left: 12px; top: 50%; transform: translateY(-50%); }
+    .lb-next { right: 12px; top: 50%; transform: translateY(-50%); }
+    .lb-cap { position: absolute; left: 12px; top: 12px; background: #111827cc; border: 1px solid #374151; padding: 7px 10px; border-radius: 8px; font-size: 12px; color: #d1d5db; max-width: 65vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lb-thumbs { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: flex; gap: 6px; max-width: 86vw; overflow-x: auto; padding: 6px 8px; background: #111827cc; border: 1px solid #374151; border-radius: 10px; }
+    .lb-thumb { width: 44px; height: 44px; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); overflow: hidden; cursor: pointer; flex: 0 0 auto; opacity: .75; }
+    .lb-thumb.active { border-color: #00FFCC; opacity: 1; box-shadow: 0 0 0 2px rgba(0,255,204,.25); }
+    .lb-thumb img { width: 100%; height: 100%; object-fit: cover; display:block; }
+
+    .videobox { position: fixed; inset: 0; background: rgba(0,0,0,.88); display: none; align-items: center; justify-content: center; z-index: 10110; }
+    .videobox.show { display: flex; }
+    .videobox-inner { position: relative; width: min(520px, 94vw); }
+    .videobox video { width: 100%; max-height: 72vh; border-radius: 10px; background: #000; box-shadow: 0 12px 42px rgba(0,0,0,.45); }
+    .vb-btn { position: absolute; top: -44px; background: #111827cc; border: 1px solid #374151; color: #fff; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+    .vb-close { right: 0; }
+    .vb-open { right: 66px; }
+    .vb-cap { position: absolute; left: 0; top: -44px; background: #111827cc; border: 1px solid #374151; padding: 7px 10px; border-radius: 8px; font-size: 12px; color: #d1d5db; max-width: 58vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vb-tools { margin-top: 10px; padding: 10px; border: 1px solid #374151; border-radius: 10px; background: #0f172aee; }
+    .vb-seek-row { display: flex; align-items: center; gap: 8px; }
+    .vb-time { width: 70px; text-align: right; font-size: 12px; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+    .vb-seek { flex: 1; accent-color: #60a5fa; cursor: ew-resize; }
+    .vb-actions { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+    .vb-frame-tip { font-size: 12px; color: #93c5fd; }
+
+    .segment-task-status {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #374151;
+      background: #111827;
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    .segment-task-status.running { border-color: #2563eb; color: #bfdbfe; background: #1e3a8a33; }
+    .segment-task-status.ok { border-color: #166534; color: #bbf7d0; background: #14532d33; }
+    .segment-task-status.err { border-color: #991b1b; color: #fecaca; background: #7f1d1d33; }
+    .panel-close-x {
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      border: 1px solid #374151;
+      background: #0f172acc;
+      color: #e5e7eb;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      z-index: 2;
+    }
+    .panel-close-x:hover { background: #1f2937; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="main-pane">
+      <div class="wrap">
+        <div class="title-row">
+          <h1 id="pageTitle" class="title">剧情分段与提示词预览</h1>
+          <button type="button" class="title-entry-btn" onclick="backToProjectHome()">项目入口</button>
+        </div>
+
+        <section id="projectHomeScreen" class="project-home">
+          <div class="project-home-hero">
+            <div class="project-home-title">项目入口</div>
+            <div class="project-home-sub">先选择要继续的项目，再进入分镜工作区。</div>
+          </div>
+          <div class="project-home-grid">
+            <div class="project-home-card">
+              <div class="project-home-card-title">加载已有项目</div>
+              <div class="project-home-card-sub">从本地索引挑选，或手动输入项目目录名。</div>
+              <div class="project-home-row">
+                <select id="projectSelect"></select>
+                <button onclick="discoverProjects({ forceRefresh: true })">刷新</button>
+              </div>
+              <div class="project-home-row">
+                <input id="projectInput" placeholder="输入项目名，例如 episode-1-20260320-113900" />
+                <button class="btn-primary" onclick="loadCurrentProject()">进入项目</button>
+              </div>
+              <div class="project-home-quick">
+                <div class="meta" style="margin:0;white-space:nowrap;">最近项目：</div>
+                <div id="projectQuickList" class="project-quick-list"></div>
+              </div>
+            </div>
+            <div class="project-home-card">
+              <div class="project-home-card-title">新建项目</div>
+              <div class="project-home-card-sub">创建本地项目壳，并立即进入编辑工作区。</div>
+              <div class="project-home-row">
+                <input id="projectCreateInput" placeholder="新项目名，例如 youguanche-ep02" />
+                <button class="btn-primary" onclick="createProject()">新建并进入</button>
+              </div>
+              <div class="project-home-current">
+                <span id="projectCurrentBadge" class="project-switcher-current">当前项目：未选择</span>
+              </div>
+            </div>
+          </div>
+          <div class="project-switcher-status">
+            <span id="status" class="meta">请选择项目后进入工作区</span>
+          </div>
+        </section>
+
+        <section id="workspaceShell" class="workspace-shell">
+        <div class="page-tabs" role="tablist" aria-label="工作流页面切换">
+          <button id="tabScriptPage" class="page-tab-btn active" role="tab" aria-selected="true" onclick="switchMainPage('script')">剧本</button>
+          <button id="tabDubbingPage" class="page-tab-btn" role="tab" aria-selected="false" onclick="switchMainPage('dubbing')">配音</button>
+        </div>
+
+        <div id="scriptPageWrap">
+          <div class="panel-toggle-btns">
+            <button class="btn-primary" onclick="toggleOutlinePanel(true)">故事大纲（放大）</button>
+            <button class="btn-primary" onclick="toggleCharacterPanel(true)">角色设定（放大）</button>
+          </div>
+
+          <div id="outlinePanelWrap" class="panel outline-panel panel-hidden">
+          <button class="panel-close-x" onclick="toggleOutlinePanel(false)" aria-label="关闭">×</button>
+          <div class="outline-toolbar">
+            <div>
+              <div class="outline-title">故事大纲</div>
+              <div class="outline-sub">自动根据当前项目分段聚合，可直接复制用于策划/对齐评审。</div>
+              <div id="outlineMeta" class="outline-meta"></div>
+              <div id="segmentTaskStatus" class="segment-task-status">任务状态：空闲</div>
+            </div>
+            <div class="outline-actions">
+              <button id="segmentTaskBtn" class="btn-primary" onclick="oneClickSegmentStory()">一键剧情分段</button>
+              <button class="btn-ghost" onclick="switchToOutlineMode()">修改大纲</button>
+              <button class="btn-ghost" onclick="analyzeCharactersFromOutline()">分析角色</button>
+            </div>
+          </div>
+          <textarea id="storyOutline" class="outline-text" placeholder="加载项目后自动生成故事大纲..."></textarea>
+        </div>
+
+        <div id="characterPanelWrap" class="panel character-panel panel-hidden">
+          <button class="panel-close-x" onclick="toggleCharacterPanel(false)" aria-label="关闭">×</button>
+          <div class="character-toolbar">
+            <div class="character-toolbar-left">
+              <div class="character-toolbar-title">角色设定</div>
+              <div class="character-toolbar-meta">
+                <span id="characterLibStatus">全局角色库：未加载</span>
+                <span id="characterProjectStatus">当前项目：未选择</span>
+              </div>
+            </div>
+            <div class="character-toolbar-actions">
+              <button class="btn-primary" onclick="switchToCharacterMode()">修改角色</button>
+            </div>
+          </div>
+          <div id="characterSection" class="character-grid"></div>
+        </div>
+
+        <div class="panel">
+          <div id="storyboardTopScroll" class="table-top-scroll" aria-label="表格横向滚动条（顶部）">
+            <div id="storyboardTopScrollInner" class="table-top-scroll-inner"></div>
+          </div>
+          <div id="storyboardTableWrap" class="table-wrap">
+            <table id="storyboardMainTable">
+              <thead>
+                <tr>
+                  <th>序号</th>
+                  <th>剧情分段（Script）</th>
+                  <th>
+                    <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
+                      <button class="btn-primary" onclick="addAllCharactersToAllSegments()">一键全部添加</button>
+                      <span>出场人物</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
+                      <button id="batchImagePromptBtn" class="btn-primary" onclick="generateAllImagePrompts()">一键生成全部</button>
+                      <span>分镜提示词</span>
+                    </div>
+                  </th>
+                  <th>场景</th>
+                  <th>
+                    <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
+                      <span>分镜图</span>
+                    </div>
+                  </th>
+                  <th>
+                    <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
+                      <button id="batchVideoPromptBtn" class="btn-primary" onclick="generateAllVideoPrompts()">一键生成全部视频提示词</button>
+                      <span>视频提示词（Video Prompt）</span>
+                    </div>
+                  </th>
+                  <th>时长</th>
+                  <th>
+                    <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
+                      <span>视频</span>
+                      <button id="batchVideoBtn" class="btn-primary" onclick="generateAllVideos()">一键生成全部视频</button>
+                    </div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        </div>
+
+        <div id="dubbingPageWrap" class="panel panel-hidden" style="padding:16px; min-height: 360px;">
+          <div style="border:1px solid rgba(34,211,238,.32);border-radius:14px;padding:14px;background:linear-gradient(180deg,rgba(34,211,238,.10),rgba(15,23,42,.30));box-shadow:inset 0 1px 0 rgba(255,255,255,.08);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+              <div>
+                <div style="font-size:15px;font-weight:700;color:#cffafe;">音色设计</div>
+                <div id="dubbingVoiceMeta" class="meta" style="margin-top:4px;">正在加载角色...</div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn-primary" onclick="copyDubbingVoiceProfiles()">复制音色设定</button>
+              </div>
+            </div>
+            <div style="margin-top:10px;border:1px dashed rgba(34,211,238,.32);border-radius:10px;padding:10px;background:rgba(2,6,23,.36);">
+              <div class="meta" style="margin-bottom:6px;">一键设置音色：支持“角色名：描述”逐行输入；支持新增/删除角色（用于修正分析错误）。</div>
+              <div style="display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;">
+                <textarea id="dubbingVoicePromptInput" style="flex:1;min-width:280px;min-height:72px;max-height:160px;border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:8px;" placeholder="每行一个角色，例如：\n黑猫记者：18岁，台湾腔女生，说话速度有一点快，声音很甜\n龙虾助手：男声，中年，沉稳，语速中速\n\n也支持只写一行通用描述（无角色名），会一键应用到全部角色"></textarea>
+                <button class="btn-primary" style="min-width:120px;" onclick="applyDubbingVoicePrompt()">一键设置音色</button>
+              </div>
+              <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <input id="dubbingVoiceRoleNameInput" placeholder="新增角色名（如：小龙虾助手）" style="min-width:220px;flex:1;border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+                <button class="btn-ghost" onclick="addDubbingVoiceRole()">+ 添加角色</button>
+              </div>
+            </div>
+            <div id="dubbingVoiceGrid" style="margin-top:12px;"></div>
+          </div>
+
+          <div style="margin-top:16px;background:#14161c;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:18px;box-shadow:0 10px 25px -5px rgba(0,0,0,.30),0 8px 10px -6px rgba(0,0,0,.30);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+              <div style="font-size:18px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px;">✨ 配音稿分析结果</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button id="analyzeDubbingBtn" class="btn-primary" onclick="oneClickAnalyzeScriptForDubbing()">一键分析剧本</button>
+                <button class="btn-ghost" onclick="copyDubbingResult()">复制配音稿</button>
+              </div>
+            </div>
+            <div id="dubbingStatus" class="meta" style="margin-top:2px;color:#94a3b8;">已恢复本项目上次保存的配音稿草稿</div>
+            <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+              <div style="font-size:13px;color:#94a3b8;">可逐条编辑台词，支持上移/下移/删除/试听</div>
+              <button class="btn-ghost" onclick="addDubbingLineRow()">+ 新增一条</button>
+            </div>
+            <div id="dubbingListEditor" style="margin-top:10px;display:flex;flex-direction:column;gap:12px;"></div>
+            <textarea id="dubbingResult" style="display:none;" placeholder="分析后将在这里生成配音稿，例如：\nA(黑猫记者)疲惫地说：今天采访总算结束了。\nB(龙虾助手)关切地说：辛苦了，要不要我来整理设备？"></textarea>
+          </div>
+        </div>
+        </section>
+      </div>
+    </div>
+
+    <aside id="chatPane" class="chat-pane" aria-label="修改助手面板">
+      <div class="chat-head">
+        <div class="chat-head-main">
+          <div id="chatPanelTitle" class="chat-title">大纲修改助手（已接本地 bridge）</div>
+          <div id="chatPanelSub" class="chat-sub">这里专门用于“修改故事大纲”。你提要求，我来改左侧大纲并自动写入。</div>
+        </div>
+        <button id="chatPaneToggleBtn" class="chat-pane-toggle" type="button" onclick="toggleChatPane()" aria-label="隐藏修改助手面板">隐藏</button>
+      </div>
+      <div id="chatMessages" class="chat-messages"></div>
+      <details class="chat-config">
+        <summary>聊天接口配置</summary>
+        <div class="chat-config-row">
+          <input id="chatApiBase" placeholder="API Base，例如 http://127.0.0.1:3000" />
+          <input id="chatModel" placeholder="model，例如 lobster-chat" />
+        </div>
+        <div class="chat-config-row">
+          <input id="chatApiPath" placeholder="接口路径，默认 /v1/chat/completions" />
+          <input id="chatApiKey" type="password" placeholder="API Key（可留空）" />
+        </div>
+        <div class="chat-config-row">
+          <button onclick="saveChatConfig()">保存配置</button>
+          <button onclick="resetChatConfig()">恢复默认</button>
+          <button onclick="testChatConfig()">测试连接</button>
+        </div>
+        <div class="chat-hint">可直接提问（默认直连本机桥 <code>127.0.0.1:12732/v1/chat/completions</code>）。也支持 URL 参数：<code>?chatBase=...</code>、<code>&chatPath=...</code>、<code>&chatModel=...</code>、<code>&chatKey=...</code>。</div>
+        <div id="chatStatus" class="chat-status"></div>
+      </details>
+      <div class="chat-input-wrap">
+        <textarea id="chatInput" class="chat-input" placeholder="输入修改要求，按 Enter 提交（Shift+Enter 换行）"></textarea>
+        <div class="chat-actions">
+          <div class="left">
+            <button onclick="clearChat()">清空聊天</button>
+          </div>
+          <div class="right">
+            <button class="btn-ghost" onclick="skipOutlineEdit()">取消</button>
+            <button id="chatSendBtn" class="chat-send" onclick="sendChat()">发送</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <button id="chatPaneDockBtn" class="chat-pane-dock" type="button" onclick="toggleChatPane(false)" aria-label="显示修改助手面板" style="display:none;">💬 显示修改助手</button>
+
+  <div id="outlineZoom" class="outline-zoom-overlay" onclick="closeOutlineZoom(event)">
+    <div class="outline-zoom-dialog" onclick="event.stopPropagation()">
+      <div class="outline-zoom-head">
+        <div class="outline-zoom-title">故事大纲（放大查看）</div>
+        <div class="outline-zoom-actions">
+          <button class="btn-ghost" onclick="copyOutlineZoomText()">复制</button>
+          <button class="btn-ghost" onclick="closeOutlineZoom(null,true)">关闭</button>
+        </div>
+      </div>
+      <div class="outline-zoom-body">
+        <textarea id="outlineZoomText" class="outline-zoom-text" readonly></textarea>
+      </div>
+    </div>
+  </div>
+
+  <div id="lightbox" class="lightbox" onclick="closeLightbox(event)">
+    <div class="lightbox-inner">
+      <div id="lbCap" class="lb-cap"></div>
+      <button class="lb-btn lb-open" onclick="openLightboxRaw(event)">新页打开</button>
+      <button class="lb-btn lb-close" onclick="closeLightbox(event, true)">关闭</button>
+      <button id="lbPrev" class="lb-btn lb-prev" onclick="lightboxPrev(event)">◀</button>
+      <button id="lbNext" class="lb-btn lb-next" onclick="lightboxNext(event)">▶</button>
+      <img id="lbImg" alt="preview" />
+      <div id="lbThumbs" class="lb-thumbs"></div>
+    </div>
+  </div>
+
+  <div id="videobox" class="videobox" onclick="closeVideoBox(event)">
+    <div class="videobox-inner">
+      <div id="vbCap" class="vb-cap"></div>
+      <button class="vb-btn vb-open" onclick="openVideoRaw(event)">新页打开</button>
+      <button class="vb-btn vb-close" onclick="closeVideoBox(event, true)">关闭</button>
+      <video id="vbVideo" controls playsinline preload="metadata"></video>
+      <div class="vb-tools" onclick="event.stopPropagation()">
+        <div class="vb-seek-row">
+          <input id="vbSeek" class="vb-seek" type="range" min="0" max="1000" step="0.01" value="0" oninput="scrubVideo(event)" />
+          <div id="vbTime" class="vb-time">00:00 / 00:00</div>
+        </div>
+        <div class="vb-actions">
+          <span class="vb-frame-tip">提示：在视频画面上点击右键，选择“将视频帧另存为…”即可保存当前帧</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="characterApplyModal" class="character-apply-modal" onclick="closeCharacterApplyPreview(event)">
+    <div class="character-apply-dialog" onclick="event.stopPropagation()">
+      <div class="character-apply-head">
+        <div class="character-apply-title">角色写入预览确认</div>
+        <div id="characterApplySub" class="character-apply-sub">请确认将要新增/覆盖的角色</div>
+      </div>
+      <div id="characterApplyList" class="character-apply-list"></div>
+      <div class="character-apply-foot">
+        <div id="characterApplyCount" class="meta">共 0 项</div>
+        <div class="character-apply-actions">
+          <button class="btn-ghost" onclick="closeCharacterApplyPreview(null,true)">取消</button>
+          <button class="btn-primary" onclick="applyCharacterPreviewChanges()">确认应用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="characterPickerModal" class="character-picker-modal" onclick="closeCharacterPicker(event)">
+    <div class="character-picker-dialog" onclick="event.stopPropagation()">
+      <div class="character-picker-head">
+        <div class="character-picker-title-row">
+          <div>
+            <div class="character-picker-title">添加全局角色到当前项目</div>
+            <div id="characterPickerProjectHint" class="character-picker-sub">当前项目：-</div>
+          </div>
+          <div class="character-picker-top-actions">
+            <button class="btn-ghost" onclick="toggleCharacterPickerSelectAll()">全选/清空</button>
+            <button class="btn-ghost" onclick="reloadGlobalCharacterLibrary().then(()=>refreshCharacterPicker())">刷新角色库</button>
+            <button class="btn-ghost" onclick="closeCharacterPicker(event,true)">关闭</button>
+          </div>
+        </div>
+        <div class="character-picker-filters">
+          <input id="characterPickerSearch" class="character-picker-search" placeholder="搜索角色名/身份/设定关键词" oninput="filterCharacterPickerList()" />
+          <span id="characterPickerSummary" class="character-picker-chip">0 / 0 已选择</span>
+        </div>
+      </div>
+      <div id="characterPickerList" class="character-picker-list"></div>
+      <div class="character-picker-foot">
+        <div id="characterPickerCount" class="meta">未选择角色</div>
+        <div class="character-picker-foot-actions">
+          <button class="btn-ghost" onclick="closeCharacterPicker(event,true)">取消</button>
+          <button class="btn-primary" onclick="confirmCharacterPicker()">添加到当前项目</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="segmentCastModal" class="segment-cast-modal" onclick="closeSegmentCastModal(true)">
+    <div class="segment-cast-dialog" onclick="event.stopPropagation()">
+      <div class="segment-cast-head">
+        <div>
+          <div id="segmentCastTitle" class="segment-cast-title">出场人物选择</div>
+          <div class="meta">手动添加 / 勾选人物 / AI 推荐后再应用到当前分段</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn-primary" onclick="openCharacterEditorFromSegmentCast()">修改角色</button>
+          <button class="btn-ghost" onclick="closeSegmentCastModal(true)">关闭</button>
+        </div>
+      </div>
+      <div class="segment-cast-body">
+        <div class="segment-cast-manual">
+          <div class="meta">手动添加人物</div>
+          <div class="segment-cast-manual-row">
+            <input id="segmentCastManualInput" placeholder="输入人物名，例如：左梵" />
+            <button class="btn-primary" onclick="addManualSegmentCastName()">添加人物</button>
+            <button id="segmentCastAiBtn" class="btn-ghost" onclick="aiSuggestSegmentCastForModal()">AI推荐</button>
+          </div>
+          <details class="segment-cast-global-picker">
+            <summary>从全局角色库选择</summary>
+            <div class="segment-cast-global-top">
+              <label class="segment-cast-global-item"><input type="checkbox" onchange="toggleGlobalRoleSelectAll(this.checked)" /> 全选</label>
+              <button class="btn-ghost" onclick="importPickedGlobalRolesToSegmentModal()">导入选中角色</button>
+            </div>
+            <div class="segment-cast-global-table-wrap">
+              <table class="segment-cast-global-table">
+                <thead>
+                  <tr>
+                    <th style="width:70px">选择</th>
+                    <th style="width:140px">角色</th>
+                    <th>人物描述</th>
+                    <th style="width:96px">角色图</th>
+                  </tr>
+                </thead>
+                <tbody id="segmentCastGlobalRows"></tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+        <div class="meta" id="segmentCastSelectedHint">已选 0 人</div>
+        <div class="segment-cast-global-table-wrap" style="max-height:50vh; margin-top:8px">
+          <table class="segment-cast-global-table">
+            <thead>
+              <tr>
+                <th style="width:70px">选择</th>
+                <th style="width:140px">角色</th>
+                <th>人物描述</th>
+                <th style="width:96px">角色图</th>
+                <th style="width:140px">操作</th>
+              </tr>
+            </thead>
+            <tbody id="segmentCastRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="segment-cast-foot">
+        <div class="meta">应用后将保存到当前项目分段</div>
+        <div>
+          <button class="btn-ghost" onclick="closeSegmentCastModal(true)">取消</button>
+          <button class="btn-primary" onclick="applySegmentCastModalSelection()">应用到该分段</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="uiBlocker" class="ui-blocker"></div>
+
+  <div id="videoGenModal" class="segment-cast-modal" onclick="closeVideoGenModal(event)">
+    <div class="video-gen-dialog" onclick="event.stopPropagation()">
+      <div class="video-gen-head">
+        <div>
+          <div id="videoGenTitle" class="video-gen-title">生成视频</div>
+          <div class="meta">选择模型、尺寸、时长，首帧图会自动使用当前分镜图。</div>
+        </div>
+        <button class="btn-ghost" onclick="closeVideoGenModal(null,true)">关闭</button>
+      </div>
+
+      <div class="video-gen-body">
+        <div class="video-gen-preview">
+          <div class="video-gen-section-label">首帧图预览</div>
+          <div style="display:flex;gap:10px;align-items:flex-start;">
+            <div style="flex:1;min-width:0;">
+              <div id="videoGenPreviewImageBox" class="video-gen-image-box">
+                <div class="video-gen-empty">当前分段暂无分镜图</div>
+              </div>
+              <input id="videoGenHeadFile" type="file" accept="image/*" onchange="onVideoGenHeadFileChange(this)" style="display:none" />
+              <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                <button id="videoGenHeadEnlargeBtn" class="btn-ghost" type="button" onclick="openHeadImageFullscreen()" title="放大查看首帧图" style="flex:0 0 auto;">🔍 放大</button>
+                <button id="videoGenHeadUploadBtn" class="btn-ghost" type="button" onclick="triggerVideoGenHeadFilePick()" title="上传首帧图" style="flex:0 0 auto;">📤 上传</button>
+                <button id="videoGenHeadResetBtn" class="btn-ghost" type="button" onclick="resetVideoGenHeadImage()" disabled style="flex:0 0 auto;">恢复分镜图</button>
+                <div style="flex:1;"></div>
+                <div class="meta" style="font-size:11px;opacity:.82;">支持 jpg/png/webp，≤ 5MB</div>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;">
+              <div id="videoGenTailImageBox" class="video-gen-image-box" onclick="onVideoGenTailBoxClick()" title="点击上传/查看尾帧图" style="cursor:pointer;width:170px;height:170px;flex:0 0 auto;">
+                <div class="video-gen-add-placeholder">
+                  <div class="plus-icon">+</div>
+                  <div style="font-size:11px;">尾帧图（可选）</div>
+                </div>
+              </div>
+              <input id="videoGenTailFile" type="file" accept="image/*" onchange="onVideoGenTailFileChange(this)" style="display:none" />
+              <div id="videoGenTailHint" style="font-size:10px;opacity:.6;margin-top:4px;width:170px;text-align:center;">不上传则纯文生视频</div>
+              <div style="display:flex;justify-content:center;gap:8px;margin-top:4px;width:170px;">
+                <button id="videoGenTailClearBtn" class="btn-ghost" type="button" onclick="clearVideoGenTailImage()" disabled>清除</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="videoGenHistoryWrap" class="history-wrap">
+            <div class="video-gen-section-label" style="color:#fff">历史生成记录</div>
+            <div id="videoGenHistory" class="history-list">
+              <div class="meta" style="opacity:.78">暂无历史记录</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="video-gen-config">
+          <div class="video-gen-config-group">
+            <div class="video-gen-section-label">参数配置</div>
+
+            <div class="video-gen-config-row">
+              <label class="meta">模型</label>
+              <select id="videoGenModel" onchange="onVideoGenModelChange()">
+                <option value="sora2-pro">sora2-pro（推荐）</option>
+                <option value="sora2">sora2</option>
+                <option value="veo3.1">veo3.1</option>
+                <option value="veo3.1-fast">veo3.1-fast（更快）</option>
+                <option value="veo3.1-ref">veo3.1-ref</option>
+              </select>
+            </div>
+
+            <div class="video-gen-config-row">
+              <label class="meta">尺寸</label>
+              <select id="videoGenSize">
+                <option value="1024x576">1024x576（横屏）</option>
+                <option value="576x1024">576x1024（竖屏）</option>
+              </select>
+            </div>
+
+            <div class="video-gen-config-row">
+              <label class="meta">时长</label>
+              <select id="videoGenDuration">
+                <option value="4">4 秒</option>
+                <option value="6">6 秒</option>
+                <option value="8" selected>8 秒</option>
+              </select>
+            </div>
+
+            <div style="margin-top: 2px;">
+              <label class="video-gen-checkbox">
+                <input id="videoGenUseHead" type="checkbox" checked />
+                <span>使用当前分镜图作为首帧</span>
+              </label>
+              <div id="videoGenHeadHint" class="meta" style="margin-left:24px;font-size:11px;">自动使用当前分镜图作为首帧</div>
+            </div>
+          </div>
+
+          <div class="video-gen-config-group">
+            <div class="video-gen-section-label">视频提示词</div>
+            <div class="video-gen-optimize-bar">
+              <label class="meta">优化目标模型</label>
+              <select id="videoGenOptimizeModel" title="选择优化目标的视频模型" onchange="this.dataset.userPicked='1'">
+                <option value="sora2-pro">sora2-pro</option>
+                <option value="sora2">sora2</option>
+                <option value="veo3.1">veo3.1</option>
+                <option value="veo3.1-fast">veo3.1-fast</option>
+                <option value="veo3.1-ref">veo3.1-ref</option>
+              </select>
+              <button id="videoGenOptimizeBtn" type="button" class="btn-ghost" onclick="optimizeVideoGenPrompt()">根据所选模型优化提示词</button>
+              <span id="videoGenOptimizeHint" class="meta" style="margin:0;font-size:11px;opacity:.78;">将按硬切镜头格式重写当前提示词</span>
+            </div>
+            <textarea id="videoGenPrompt" placeholder="视频提示词（默认读取该分段的 Video Prompt）"></textarea>
+            <div id="videoGenStatus" class="meta" style="text-align:right;color:#22d3ee">当前状态：空闲</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="video-gen-foot">
+        <label class="video-gen-checkbox" style="opacity:.88;">
+          <input id="videoGenApplyAll" type="checkbox" />
+          <span>设为「一键生成全部视频」的默认配置</span>
+        </label>
+        <div class="video-gen-actions">
+          <button class="btn-ghost" onclick="closeVideoGenModal(null,true)">取消</button>
+          <button id="videoGenSubmitBtn" class="btn-primary" onclick="submitVideoGenModal()">开始生成视频</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script src="./js/core-chat.js"></script>
+<script src="./js/character.js"></script>
+<script src="./js/video-outline.js"></script>
+<script src="./js/render-init.js"></script>
+</body>
+</html>

@@ -18,6 +18,10 @@ interface Settings {
   debugToken: string;
   maxConcurrent: number;
   uploadUrl: string;
+  // --- drama workspace chat upstream (sub2api) ---
+  chatBase: string;
+  chatKey: string;
+  chatModel: string;
 }
 interface RefImg {
   value: string; // http(s) URL or data: URI
@@ -51,9 +55,12 @@ const SIZE_PATTERN = /^[0-9]{2,5}x[0-9]{2,5}$/;
 
 // ---------- settings persistence ----------
 const STORE_KEY = "xinghuo_settings";
+const TASKS_KEY = "xinghuo_tasks";
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
+const DEFAULT_CHAT_BASE = "https://sub.linggan10s.shop/v1";
+const DEFAULT_CHAT_MODEL = "gpt-5.5";
 
 function loadSettings(): Settings {
   const d: Settings = {
@@ -66,6 +73,9 @@ function loadSettings(): Settings {
     debugToken: "",
     maxConcurrent: 3,
     uploadUrl: DEFAULT_UPLOAD,
+    chatBase: DEFAULT_CHAT_BASE,
+    chatKey: "",
+    chatModel: DEFAULT_CHAT_MODEL,
   };
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -81,6 +91,9 @@ function loadSettings(): Settings {
         debugToken: s.debugToken ?? d.debugToken,
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
         uploadUrl: s.uploadUrl ?? d.uploadUrl,
+        chatBase: s.chatBase ?? d.chatBase,
+        chatKey: s.chatKey ?? d.chatKey,
+        chatModel: s.chatModel ?? d.chatModel,
       };
 
       // --- one-time migration of stale saved settings ---
@@ -137,6 +150,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button class="tab" data-tab="t2i">文生图</button>
       <button class="tab" data-tab="i2i">图生图</button>
       <button class="tab" data-tab="tasks">任务<span id="task-badge" class="tab-badge hidden"></span></button>
+      <button class="tab" data-tab="drama">漫剧工作台</button>
       <button class="tab" data-tab="settings">设置</button>
     </nav>
   </header>
@@ -215,6 +229,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="tasklist" id="task-list"></div>
     </section>
 
+    <!-- 漫剧工作台（内嵌本地服务提供的静态页） -->
+    <section class="panel hidden" id="panel-drama" style="padding:0;overflow:hidden;">
+      <iframe id="drama-iframe" style="width:100%;height:100%;border:none;" sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>
+    </section>
+
     <!-- 设置 -->
     <section class="panel hidden" id="panel-settings">
       <label class="field">
@@ -252,6 +271,22 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <span>调试 Token（debug_chatgpt_token，可留空）</span>
         <input id="set-debug-token" type="text" placeholder="一般无需填写" />
       </label>
+      <hr style="border-color:var(--border);margin:16px 0;" />
+      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
+        🎬 漫剧工作台 · 聊天接口（sub2api 标准 OpenAI 兼容） — 用于剧本助手 / 台词生成等，与上方图片接口独立
+      </p>
+      <label class="field">
+        <span>聊天接口地址 (Chat Base URL)</span>
+        <input id="set-chat-base" type="text" placeholder="${DEFAULT_CHAT_BASE}" />
+      </label>
+      <label class="field">
+        <span>聊天 API Key</span>
+        <input id="set-chat-key" type="password" placeholder="sk-..." />
+      </label>
+      <label class="field">
+        <span>聊天模型</span>
+        <input id="set-chat-model" type="text" placeholder="${DEFAULT_CHAT_MODEL}" />
+      </label>
       <div class="row">
         <button class="primary" id="btn-save">保存设置</button>
       </div>
@@ -259,7 +294,8 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <p class="hint">
         生成的图片会自动保存到「图片 / Pictures」目录下的 <code>xinghuo-image-tool</code> 文件夹。设置仅保存在本机。<br />
         模型：<code>gpt-5-3</code> = GPT-Image（标准）；<code>gpt-5-4-thinking</code> = GPT-Image2（仅 Plus 账户可用）。<br />
-        点「生成」会把任务加入队列并立刻返回，可连续提交；同时进行的数量由「最大同时任务数」控制，多出的会排队。
+        点「生成」会把任务加入队列并立刻返回，可连续提交；同时进行的数量由「最大同时任务数」控制，多出的会排队。<br />
+        漫剧工作台的聊天接口与图片接口独立配置，聊天 Key <b>留在 Rust 端</b>，工作台页面拿不到。
       </p>
     </section>
   </main>
@@ -292,29 +328,64 @@ function modelLabel(value: string): string {
   return MODELS.find((m) => m.value === value)?.label ?? value;
 }
 
+// ---------- lightbox (click any image to enlarge) ----------
+let lightboxEl: HTMLDivElement | null = null;
+function closeLightbox(): void {
+  lightboxEl?.classList.add("hidden");
+}
+function openLightbox(src: string): void {
+  if (!src) return;
+  if (!lightboxEl) {
+    lightboxEl = document.createElement("div");
+    lightboxEl.className = "lightbox hidden";
+    lightboxEl.appendChild(document.createElement("img"));
+    lightboxEl.addEventListener("click", closeLightbox);
+    document.body.appendChild(lightboxEl);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeLightbox();
+    });
+  }
+  (lightboxEl.firstElementChild as HTMLImageElement).src = src;
+  lightboxEl.classList.remove("hidden");
+}
+
 /** One result image as a card with preview + actions. */
 function buildImageCard(out: ImageOut): HTMLDivElement {
-  const dataUri = `data:${out.mime};base64,${out.b64}`;
   const card = document.createElement("div");
   card.className = "card";
 
   const img = document.createElement("img");
-  img.src = dataUri;
-  if (out.source_url) {
-    img.title = "点击在浏览器中打开原图";
-    img.style.cursor = "pointer";
-    img.addEventListener("click", () => window.open(out.source_url!, "_blank"));
-  }
+  img.style.cursor = "pointer";
+  img.title = "点击放大查看";
   card.appendChild(img);
-
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
 
   const dl = document.createElement("a");
   dl.className = "mini";
   dl.textContent = "另存为";
-  dl.href = dataUri;
   dl.download = out.saved_path.split(/[\\/]/).pop() || "image.png";
+
+  // Resolve the image: use in-memory base64 if present, otherwise read it back
+  // from disk (persisted tasks store only the path, not heavy base64).
+  let dataUri = "";
+  const apply = (b64: string, mime: string) => {
+    dataUri = `data:${mime};base64,${b64}`;
+    img.src = dataUri;
+    dl.href = dataUri;
+  };
+  if (out.b64) {
+    apply(out.b64, out.mime);
+  } else if (out.saved_path) {
+    invoke<{ b64: string; mime: string }>("read_saved_image", { path: out.saved_path })
+      .then((r) => apply(r.b64, r.mime))
+      .catch(() => {
+        img.alt = "图片已不在磁盘";
+        img.title = "原文件已被移动或删除";
+      });
+  }
+  img.addEventListener("click", () => openLightbox(dataUri));
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
   actions.appendChild(dl);
 
   const copyPath = document.createElement("button");
@@ -377,6 +448,8 @@ function wireSize(prefix: string): () => string | null {
 }
 
 // ---------- tabs ----------
+let dramaLoaded = false;
+
 function switchTab(name: string): void {
   for (const t of document.querySelectorAll<HTMLButtonElement>(".tab")) {
     t.classList.toggle("active", t.dataset.tab === name);
@@ -384,11 +457,30 @@ function switchTab(name: string): void {
   for (const p of document.querySelectorAll<HTMLElement>(".panel")) {
     p.classList.toggle("hidden", p.id !== `panel-${name}`);
   }
+  // First time visiting drama: load the embedded workspace into the iframe.
+  if (name === "drama" && !dramaLoaded) {
+    loadDramaIframe();
+  }
 }
 for (const t of document.querySelectorAll<HTMLButtonElement>(".tab")) {
   t.addEventListener("click", () => switchTab(t.dataset.tab!));
 }
 switchTab("t2i");
+
+// ---------- gateway / drama workspace ----------
+async function loadDramaIframe() {
+  try {
+    const url: string = await invoke("gateway_url");
+    const iframe = byId<HTMLIFrameElement>("drama-iframe");
+    iframe.src = url;
+    dramaLoaded = true;
+  } catch (e) {
+    setStatus("drama-status", `无法连接到漫剧服务：${e}`, "error");
+  }
+}
+
+// Push current settings to the gateway on startup (best-effort).
+syncGatewayConfig();
 
 // ---------- task queue ----------
 let tasks: Task[] = [];
@@ -514,6 +606,7 @@ async function runTask(t: Task): Promise<void> {
   } finally {
     running--;
     renderTasks();
+    saveTasks();
     pump();
   }
 }
@@ -552,6 +645,7 @@ function enqueue(
   });
   queue.push(id);
   renderTasks();
+  saveTasks();
   pump();
 }
 
@@ -562,11 +656,13 @@ function removeTask(id: number): void {
   if (qi >= 0) queue.splice(qi, 1);
   tasks.splice(i, 1);
   renderTasks();
+  saveTasks();
 }
 
 byId<HTMLButtonElement>("btn-clear-done").addEventListener("click", () => {
   tasks = tasks.filter((t) => t.status === "running" || t.status === "queued");
   renderTasks();
+  saveTasks();
 });
 
 function submittedNote(n = 1): string {
@@ -581,6 +677,48 @@ function readCount(id: string): number {
   return Number.isFinite(v) ? Math.min(4, Math.max(1, v)) : 1;
 }
 
+// ---------- task persistence (survive app restart) ----------
+// We store only metadata + each result's saved_path (NOT the base64 bytes —
+// that would blow the localStorage quota). On reload the images are read back
+// from disk via the `read_saved_image` command.
+function saveTasks(): void {
+  try {
+    const slim = tasks.slice(0, 60).map((t): Task => {
+      const interrupted = t.status === "queued" || t.status === "running";
+      return {
+        ...t,
+        status: interrupted ? "error" : t.status,
+        error: interrupted ? "（应用已重启，任务未完成）" : t.error,
+        outs: t.outs.map((o) => ({ ...o, b64: "" })),
+      };
+    });
+    localStorage.setItem(TASKS_KEY, JSON.stringify({ seq: taskSeq, tasks: slim }));
+  } catch {
+    /* quota / serialization issues are non-fatal */
+  }
+}
+function loadTasks(): void {
+  try {
+    const raw = localStorage.getItem(TASKS_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw) as { seq?: number; tasks?: Task[] };
+    if (!Array.isArray(data.tasks)) return;
+    tasks = data.tasks.map((t): Task => ({
+      ...t,
+      status: t.status === "queued" || t.status === "running" ? "error" : t.status,
+      error: t.error || "",
+      outs: Array.isArray(t.outs) ? t.outs : [],
+    }));
+    taskSeq =
+      typeof data.seq === "number"
+        ? data.seq
+        : tasks.reduce((m, t) => Math.max(m, t.id), 0);
+  } catch {
+    /* ignore corrupt storage */
+  }
+}
+
+loadTasks();
 renderTasks();
 
 // ---------- settings wiring ----------
@@ -591,6 +729,10 @@ const concurrencyInput = byId<HTMLInputElement>("set-concurrency");
 const tierSelect = byId<HTMLSelectElement>("set-tier");
 const debugTokenInput = byId<HTMLInputElement>("set-debug-token");
 const uploadInput = byId<HTMLInputElement>("set-upload");
+const chatBaseInput = byId<HTMLInputElement>("set-chat-base");
+const chatKeyInput = byId<HTMLInputElement>("set-chat-key");
+const chatModelInput = byId<HTMLInputElement>("set-chat-model");
+
 baseInput.value = settings.baseUrl;
 keyInput.value = settings.apiKey;
 timeoutInput.value = String(settings.timeoutSec);
@@ -598,8 +740,31 @@ concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
 debugTokenInput.value = settings.debugToken;
 uploadInput.value = settings.uploadUrl;
+chatBaseInput.value = settings.chatBase;
+chatKeyInput.value = settings.chatKey;
+chatModelInput.value = settings.chatModel;
 
-byId<HTMLButtonElement>("btn-save").addEventListener("click", () => {
+// Push settings to the embedded gateway (image gen + chat upstream keys).
+async function syncGatewayConfig() {
+  try {
+    await invoke("configure_gateway", {
+      cfg: {
+        imgBase: settings.baseUrl || DEFAULT_BASE,
+        imgKey: settings.apiKey,
+        imgModel: settings.model,
+        imgUploadUrl: settings.uploadUrl || "",
+        imgTimeout: settings.timeoutSec,
+        chatBase: settings.chatBase || DEFAULT_CHAT_BASE,
+        chatKey: settings.chatKey,
+        chatModel: settings.chatModel || DEFAULT_CHAT_MODEL,
+      },
+    });
+  } catch (e) {
+    // gateway sync is best-effort; ignore if not ready yet
+  }
+}
+
+byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
   const t = parseInt(timeoutInput.value, 10);
   const c = parseInt(concurrencyInput.value, 10);
   settings = {
@@ -611,10 +776,14 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", () => {
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
     uploadUrl: uploadInput.value.trim() || DEFAULT_UPLOAD,
+    chatBase: chatBaseInput.value.trim() || DEFAULT_CHAT_BASE,
+    chatKey: chatKeyInput.value.trim(),
+    chatModel: chatModelInput.value.trim() || DEFAULT_CHAT_MODEL,
   };
   timeoutInput.value = String(settings.timeoutSec);
   concurrencyInput.value = String(settings.maxConcurrent);
   saveSettings(settings);
+  await syncGatewayConfig();
   setStatus("set-status", "已保存 ✓", "ok");
   pump(); // a higher limit may let queued tasks start now
 });
@@ -647,6 +816,9 @@ function renderRefs(): void {
     chip.className = "ref";
     const img = document.createElement("img");
     img.src = r.value;
+    img.style.cursor = "pointer";
+    img.title = "点击放大查看";
+    img.addEventListener("click", () => openLightbox(r.value));
     chip.appendChild(img);
     const rm = document.createElement("button");
     rm.className = "ref-rm";
