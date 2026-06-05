@@ -739,7 +739,7 @@ async fn handle_voice_preview(
 
 async fn handle_chat(
     State((cfg, _)): State<(SharedConfig, DubbingState)>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
     let (base, key, model) = {
@@ -751,9 +751,13 @@ async fn handle_chat(
 
     let url = chat_url(&base);
     let client = match crate::http_client(300) { Ok(c) => c, Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})) };
-    let mut rb = client.post(&url).json(&body);
-    if !key.is_empty() { rb = rb.bearer_auth(&key); }
-    else if let Some(a) = headers.get(header::AUTHORIZATION) { rb = rb.header(header::AUTHORIZATION, a); }
+    // Always use the configured chat key from main app settings.
+    // The workspace page must not send its own key; all keys stay Rust-side.
+    if key.is_empty() {
+        return err_json(StatusCode::BAD_GATEWAY,
+            json!({"error":{"message":"聊天接口未配置 API Key，请在设置页的「漫剧工作台 · 聊天接口」填写"}}));
+    }
+    let rb = client.post(&url).json(&body).bearer_auth(&key);
 
     match rb.send().await {
         Ok(r) => { let st=r.status(); let t=r.text().await.unwrap_or_default();

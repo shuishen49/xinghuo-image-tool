@@ -540,7 +540,10 @@ async function loadDramaIframe() {
   try {
     const url: string = await invoke("gateway_url");
     const iframe = byId<HTMLIFrameElement>("drama-iframe");
-    iframe.src = url;
+    // Pass chatBase to the workspace so it calls the gateway's own
+    // /v1/chat/completions (key stays Rust-side, never in URL).
+    const chatParams = new URLSearchParams({ chatBase: url, chatPath: "/v1/chat/completions" });
+    iframe.src = `${url}/main.html?${chatParams.toString()}`;
     dramaLoaded = true;
   } catch (e) {
     setStatus("drama-status", `无法连接到漫剧服务：${e}`, "error");
