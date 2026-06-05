@@ -488,17 +488,46 @@ async function oneClickSegmentStory(){
     }
 
     const parsed = extractSegmentsJsonFromText(text);
+    if(!parsed || !parsed.segments){
+      // AI returned text but no parseable JSON — show a preview so user can see what went wrong
+      const preview = text.length > 300 ? text.slice(0, 300) + '…' : text;
+      const msg = `分段失败：AI 返回内容中未找到有效 JSON 分段数据。\n\n返回预览：${preview}`;
+      setStatus(msg, false);
+      setSegmentTaskStatus('分段失败：未找到 JSON 分段数据', 'err');
+      if(typeof setChatStatus === 'function') setChatStatus('AI 未按 JSON 格式返回分段，请重试。', false);
+      return;
+    }
+    if(!parsed.segments.length){
+      setStatus('分段失败：AI 返回的分段列表为空', false);
+      setSegmentTaskStatus('分段失败：段数为 0', 'err');
+      return;
+    }
     let applied = false;
-    if(parsed?.segments?.length && typeof applyManualSegmentsToPreviewRows === 'function'){
+    if(typeof applyManualSegmentsToPreviewRows === 'function'){
       applied = !!applyManualSegmentsToPreviewRows(parsed.segments);
+    } else {
+      setStatus('分段失败：渲染模块未加载（applyManualSegmentsToPreviewRows 缺失）', false);
+      setSegmentTaskStatus('分段失败：渲染上下文缺失', 'err');
+      return;
     }
     if(!applied){
-      throw new Error('分段结果已生成，但写入下方表格失败（未找到可用渲染上下文）');
+      // Try one more time with explicit render call
+      const segs = normalizeSegments(parsed.segments);
+      if(segs && segs.length){
+        const project = latestOutlineProject || getProject() || 'manual-segments';
+        setProjectManualSegments(project, segs);
+        if(typeof render === 'function'){
+          render(project, segs, {}, {}, {}, {}, {}, {});
+          applied = true;
+        }
+      }
+    }
+    if(!applied){
+      throw new Error('分段已生成但渲染失败：请尝试刷新页面后重新点击"一键剧情分段"');
     }
 
-    const countMatch = text.match(/"id"\s*:\s*"S\d+"/g);
-    const count = parsed?.segments?.length || (countMatch ? countMatch.length : null);
-    const countLabel = count ? `${count} 段` : '若干段';
+    const count = parsed.segments.length;
+    const countLabel = `${count} 段`;
     setStatus(`剧情分段已写入下方表格（${countLabel}，规则：长对话≤10s，短剧情≤5s）。故事大纲未改动。`);
     setSegmentTaskStatus(`已完成（${countLabel}，已写入下方表格）`, 'ok');
     if(typeof setChatStatus === 'function') setChatStatus('剧情分段已完成（仅更新下方表格）。', true);
