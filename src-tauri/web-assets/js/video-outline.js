@@ -257,6 +257,8 @@ function durationLabel(seg){
 let latestOutlineProject = '';
 let latestOutlineSegments = [];
 let segmentTaskRunning = false;
+let outlineAutosaveBound = false;
+let outlineAutosaveTimer = null;
 
 function setSegmentTaskStatus(text = '', state = 'idle'){
   const el = q('segmentTaskStatus');
@@ -392,6 +394,38 @@ function renderStoryOutline(project, segments = [], forceGenerated = false){
     ];
     metaWrap.innerHTML = chips.join('');
   }
+
+  setupOutlineAutosave();
+}
+
+// 自动保存：用户手动编辑故事大纲时，把内容写入草稿(localStorage)，
+// 避免修改后未保存、下次打开变空白。只绑定一次。
+function setupOutlineAutosave(){
+  if(outlineAutosaveBound) return;
+  const box = q('storyOutline');
+  if(!box) return;
+  outlineAutosaveBound = true;
+
+  box.addEventListener('input', () => {
+    if(outlineAutosaveTimer) clearTimeout(outlineAutosaveTimer);
+    outlineAutosaveTimer = setTimeout(() => {
+      const project = latestOutlineProject || getProject();
+      saveStoryOutlineDraft(project, box.value);
+    }, 400);
+  });
+
+  // 放大编辑弹窗：编辑时同步写回主文本框并保存草稿，保持两处一致。
+  const zoomBox = q('outlineZoomText');
+  if(zoomBox){
+    zoomBox.addEventListener('input', () => {
+      box.value = zoomBox.value;
+      if(outlineAutosaveTimer) clearTimeout(outlineAutosaveTimer);
+      outlineAutosaveTimer = setTimeout(() => {
+        const project = latestOutlineProject || getProject();
+        saveStoryOutlineDraft(project, box.value);
+      }, 400);
+    });
+  }
 }
 
 function regenerateStoryOutline(){
@@ -411,28 +445,119 @@ function focusOutlineEditor(){
   setStatus('已定位到故事大纲编辑区');
 }
 
+// Find every balanced {...} or [...] block in a string (handles strings/escapes).
+function findJsonCandidates(raw){
+  const out = [];
+  for(let i = 0; i < raw.length; i++){
+    const open = raw[i];
+    if(open !== '{' && open !== '[') continue;
+    const close = open === '{' ? '}' : ']';
+    let depth = 0, inStr = false, esc = false;
+    for(let j = i; j < raw.length; j++){
+      const ch = raw[j];
+      if(inStr){
+        if(esc){ esc = false; }
+        else if(ch === '\\'){ esc = true; }
+        else if(ch === '"'){ inStr = false; }
+        continue;
+      }
+      if(ch === '"'){ inStr = true; continue; }
+      if(ch === open) depth++;
+      else if(ch === close){
+        depth--;
+        if(depth === 0){ out.push(raw.slice(i, j + 1)); break; }
+      }
+    }
+  }
+  return out;
+}
+
+// Coerce various shapes into { segments: [...] }.
+function coerceSegmentsObject(obj){
+  if(!obj || typeof obj !== 'object') return null;
+  if(Array.isArray(obj)) return { segments: obj };
+  if(Array.isArray(obj.segments)) return obj;
+  if(Array.isArray(obj.data?.segments)) return { segments: obj.data.segments };
+  if(Array.isArray(obj.result?.segments)) return { segments: obj.result.segments };
+  if(Array.isArray(obj.list)) return { segments: obj.list };
+  if(Array.isArray(obj.rows)) return { segments: obj.rows };
+  return null;
+}
+
 function extractSegmentsJsonFromText(text=''){
   const raw = String(text || '').trim();
   if(!raw) return null;
 
-  const fenced = raw.match(/```json\s*([\s\S]*?)```/i);
-  if(fenced && fenced[1]){
+  // 1) ```json ... ``` fenced blocks (or plain ``` ... ```)
+  const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for(const m of fences){
     try {
-      const obj = JSON.parse(fenced[1].trim());
-      if(Array.isArray(obj?.segments)) return obj;
+      const obj = coerceSegmentsObject(JSON.parse(String(m[1] || '').trim()));
+      if(obj?.segments?.length) return obj;
     } catch {}
   }
 
-  const starts = [];
-  for(let i = 0; i < raw.length; i++) if(raw[i] === '{') starts.push(i);
-  for(let i = starts.length - 1; i >= 0; i--){
-    const part = raw.slice(starts[i]).trim();
+  // 2) Every balanced {...} / [...] candidate, largest first.
+  const candidates = findJsonCandidates(raw).sort((a, b) => b.length - a.length);
+  for(const c of candidates){
     try {
-      const obj = JSON.parse(part);
-      if(Array.isArray(obj?.segments)) return obj;
+      const obj = coerceSegmentsObject(JSON.parse(c));
+      if(obj?.segments?.length) return obj;
     } catch {}
   }
+
+  // 3) Loose repair: strip trailing commas, smart quotes, then retry largest.
+  for(const c of candidates){
+    const repaired = c
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/,\s*([}\]])/g, '$1');
+    try {
+      const obj = coerceSegmentsObject(JSON.parse(repaired));
+      if(obj?.segments?.length) return obj;
+    } catch {}
+  }
+
+  // 4) Last resort: parse the human-readable list into segments.
+  const fromText = parseSegmentsFromReadableText(raw);
+  if(fromText?.segments?.length) return fromText;
+
   return null;
+}
+
+// Fallback: parse a numbered/structured readable list into segments.
+// Recognises lines like: "S01 | 5秒 | 短剧情 | 画面... | 动作... | 台词..."
+// or markdown / labelled blocks with 段号/时长/类型/画面/动作/台词.
+function parseSegmentsFromReadableText(raw){
+  const segments = [];
+  // Split into blocks by segment id markers (S01, S1, 第1段, 镜头1, etc.)
+  const blocks = raw.split(/\n(?=\s*(?:S\d+|第\s*\d+\s*段|镜头\s*\d+|片段\s*\d+)\b)/i);
+  let idx = 0;
+  for(const block of blocks){
+    const b = block.trim();
+    if(!b) continue;
+    const idMatch = b.match(/\b(S\d{1,3})\b/i) || b.match(/第\s*(\d+)\s*段/) || b.match(/镜头\s*(\d+)/);
+    const durMatch = b.match(/(\d+(?:\.\d+)?)\s*(?:秒|s\b)/i);
+    const typeMatch = b.match(/(长对话|短剧情|对话|剧情|动作)/);
+    const dialogueMatch = b.match(/台词[：:]\s*([^\n]+)/);
+    const sceneMatch = b.match(/(?:画面|场景)[：:]\s*([^\n]+)/);
+    const actionMatch = b.match(/(?:动作|角色动作)[：:]\s*([^\n]+)/);
+    if(!idMatch && !durMatch && !sceneMatch && !dialogueMatch) continue;
+    idx++;
+    const sid = idMatch
+      ? (/^S/i.test(idMatch[1]||idMatch[0]) ? String(idMatch[1]||idMatch[0]).toUpperCase() : `S${String(idMatch[1]).padStart(2,'0')}`)
+      : `S${String(idx).padStart(2,'0')}`;
+    segments.push({
+      id: sid,
+      segmentId: sid,
+      durationSec: durMatch ? Number(durMatch[1]) : undefined,
+      type: typeMatch ? typeMatch[1] : '',
+      scene: sceneMatch ? sceneMatch[1].trim() : '',
+      action: actionMatch ? actionMatch[1].trim() : '',
+      dialogue: dialogueMatch ? dialogueMatch[1].trim() : '',
+    });
+  }
+  return segments.length ? { segments } : null;
 }
 
 async function oneClickSegmentStory(){
@@ -458,19 +583,20 @@ async function oneClickSegmentStory(){
 
   const project = latestOutlineProject || getProject();
   const sysRules = [
-    '你是短视频剧情分段助手。',
-    '请把输入大纲拆成可执行分镜段落，并严格按时长约束：',
-    '1) 长对话段：单段最长 10 秒。',
-    '2) 短剧情动作段：单段最长 5 秒。',
-    '3) 不能出现超过上限的段落。',
-    '4) 每段必须包含：段号、时长(秒)、类型(长对话/短剧情)、画面内容、角色动作、台词(可空)。',
-    '5) 输出先给“分段列表（可读版）”，然后给严格 JSON。',
-    '6) JSON 格式固定为：{"segments":[{"id":"S01","durationSec":5,"type":"短剧情","scene":"...","action":"...","dialogue":"..."}]}.',
-    '7) 解释里明确：之所以限制 10s/5s，是因为视频最大长度约束。',
-    '8) 仅输出结果，不要寒暄。'
+    '你是短视频剧情分段助手。把输入大纲拆成可执行分镜段落。',
+    '时长约束：长对话段单段≤10秒；短剧情动作段单段≤5秒；不得超限。',
+    '',
+    '【输出要求 · 非常重要】',
+    '只输出一个 JSON 对象，不要输出任何解释、标题、寒暄、markdown 代码块标记。',
+    '第一个字符必须是 {，最后一个字符必须是 }。',
+    '',
+    'JSON 结构固定如下（segments 至少 1 项）：',
+    '{"segments":[{"id":"S01","durationSec":5,"type":"短剧情","scene":"画面内容","action":"角色动作","dialogue":"台词，可为空字符串"}]}',
+    '',
+    '字段说明：id 从 S01 递增；durationSec 为整数秒；type 取“长对话”或“短剧情”；scene/action 必填；dialogue 可为空字符串。',
   ].join('\n');
 
-  const prompt = `${sysRules}\n\n【项目】${project || '未命名项目'}\n【待分段大纲】\n${outlineText}`;
+  const prompt = `${sysRules}\n\n【项目】${project || '未命名项目'}\n【待分段大纲】\n${outlineText}\n\n现在只输出 JSON：`;
 
   try {
     segmentTaskRunning = true;
@@ -481,20 +607,23 @@ async function oneClickSegmentStory(){
 
     const reply = await requestChatCompletion(prompt);
     const text = String(reply || '').trim();
+    console.log('[segment] AI raw reply length=', text.length, '\n', text);
 
     if(!text){
-      setStatus('分段失败：AI 返回空内容', false);
+      setStatus('分段失败：AI 返回空内容（可能流式未拼接到内容）', false);
+      setSegmentTaskStatus('分段失败：AI 返回空内容', 'err');
       return;
     }
 
     const parsed = extractSegmentsJsonFromText(text);
     if(!parsed || !parsed.segments){
-      // AI returned text but no parseable JSON — show a preview so user can see what went wrong
-      const preview = text.length > 300 ? text.slice(0, 300) + '…' : text;
-      const msg = `分段失败：AI 返回内容中未找到有效 JSON 分段数据。\n\n返回预览：${preview}`;
-      setStatus(msg, false);
-      setSegmentTaskStatus('分段失败：未找到 JSON 分段数据', 'err');
-      if(typeof setChatStatus === 'function') setChatStatus('AI 未按 JSON 格式返回分段，请重试。', false);
+      // AI returned text but no parseable JSON — show it in chat so user can see + retry
+      console.warn('[segment] no JSON found. raw reply:\n', text);
+      addChat('bot', `分段未能自动解析。AI 原始返回如下，可点「🔄 重新发送」再试：\n\n${text}`, { isError: true });
+      const preview = text.length > 200 ? text.slice(0, 200) + '…' : text;
+      setStatus(`分段失败：未找到 JSON 分段数据。返回预览：${preview}`, false);
+      setSegmentTaskStatus('分段失败：未找到 JSON 分段数据（已在右侧显示原文）', 'err');
+      if(typeof setChatStatus === 'function') setChatStatus('AI 未按 JSON 格式返回，已显示原文，可重试。', false);
       return;
     }
     if(!parsed.segments.length){

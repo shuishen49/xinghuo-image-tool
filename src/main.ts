@@ -315,6 +315,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <span>聊天模型</span>
         <input id="set-chat-model" type="text" placeholder="${DEFAULT_CHAT_MODEL}" />
       </label>
+      <div class="row" style="gap:8px;align-items:center;">
+        <button id="btn-test-chat" class="btn" type="button">测试聊天接口</button>
+        <span id="chat-test-result" style="font-size:13px;color:var(--muted);"></span>
+      </div>
       <div class="row">
       <hr style="border-color:var(--border);margin:16px 0;" />
       <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
@@ -540,10 +544,7 @@ async function loadDramaIframe() {
   try {
     const url: string = await invoke("gateway_url");
     const iframe = byId<HTMLIFrameElement>("drama-iframe");
-    // Pass chatBase to the workspace so it calls the gateway's own
-    // /v1/chat/completions (key stays Rust-side, never in URL).
-    const chatParams = new URLSearchParams({ chatBase: url, chatPath: "/v1/chat/completions" });
-    iframe.src = `${url}/main.html?${chatParams.toString()}`;
+    iframe.src = `${url}/main.html`;
     dramaLoaded = true;
   } catch (e) {
     setStatus("drama-status", `无法连接到漫剧服务：${e}`, "error");
@@ -803,6 +804,8 @@ const uploadInput = byId<HTMLInputElement>("set-upload");
 const chatBaseInput = byId<HTMLInputElement>("set-chat-base");
 const chatKeyInput = byId<HTMLInputElement>("set-chat-key");
 const chatModelInput = byId<HTMLInputElement>("set-chat-model");
+const btnTestChat = byId<HTMLButtonElement>("btn-test-chat");
+const chatTestResult = byId<HTMLSpanElement>("chat-test-result");
 const pic2apiBaseInput = byId<HTMLInputElement>("set-pic2api-base");
 const pic2apiKeyInput = byId<HTMLInputElement>("set-pic2api-key");
 const pic2apiModelInput = byId<HTMLInputElement>("set-pic2api-model");
@@ -855,6 +858,26 @@ async function syncGatewayConfig() {
     // gateway sync is best-effort; ignore if not ready yet
   }
 }
+
+btnTestChat.addEventListener("click", async () => {
+  btnTestChat.disabled = true;
+  chatTestResult.textContent = "测试中…";
+  chatTestResult.style.color = "var(--muted)";
+  try {
+    const msg = await invoke<string>("test_chat_base", {
+      base: chatBaseInput.value.trim() || DEFAULT_CHAT_BASE,
+      key: chatKeyInput.value.trim(),
+      model: chatModelInput.value.trim() || DEFAULT_CHAT_MODEL,
+    });
+    chatTestResult.textContent = msg;
+    chatTestResult.style.color = "var(--ok)";
+  } catch (e) {
+    chatTestResult.textContent = String(e);
+    chatTestResult.style.color = "var(--err)";
+  } finally {
+    btnTestChat.disabled = false;
+  }
+});
 
 byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
   const t = parseInt(timeoutInput.value, 10);

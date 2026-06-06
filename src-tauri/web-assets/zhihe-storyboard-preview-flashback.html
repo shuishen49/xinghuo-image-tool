@@ -1330,24 +1330,7 @@
         <button id="chatPaneToggleBtn" class="chat-pane-toggle" type="button" onclick="toggleChatPane()" aria-label="隐藏修改助手面板">隐藏</button>
       </div>
       <div id="chatMessages" class="chat-messages"></div>
-      <details class="chat-config">
-        <summary>聊天接口配置</summary>
-        <div class="chat-config-row">
-          <input id="chatApiBase" placeholder="API Base，例如 http://127.0.0.1:3000" />
-          <input id="chatModel" placeholder="model，例如 lobster-chat" />
-        </div>
-        <div class="chat-config-row">
-          <input id="chatApiPath" placeholder="接口路径，默认 /v1/chat/completions" />
-          <input id="chatApiKey" type="password" placeholder="API Key（可留空）" />
-        </div>
-        <div class="chat-config-row">
-          <button onclick="saveChatConfig()">保存配置</button>
-          <button onclick="resetChatConfig()">恢复默认</button>
-          <button onclick="testChatConfig()">测试连接</button>
-        </div>
-        <div class="chat-hint">可直接提问（默认直连本机桥 <code>127.0.0.1:12732/v1/chat/completions</code>）。也支持 URL 参数：<code>?chatBase=...</code>、<code>&chatPath=...</code>、<code>&chatModel=...</code>、<code>&chatKey=...</code>。</div>
-        <div id="chatStatus" class="chat-status"></div>
-      </details>
+      <div id="chatStatus" class="chat-status" hidden></div>
       <div class="chat-input-wrap">
         <textarea id="chatInput" class="chat-input" placeholder="输入修改要求，按 Enter 提交（Shift+Enter 换行）"></textarea>
         <div class="chat-actions">

@@ -591,6 +591,45 @@ fn gateway_url(state: tauri::State<'_, SharedConfig>) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+#[tauri::command]
+async fn test_chat_base(base: String, key: String, model: String) -> Result<String, String> {
+    let b = base.trim().trim_end_matches('/');
+    if b.is_empty() {
+        return Err("Base URL 为空".into());
+    }
+    let url = if b.ends_with("/chat/completions") {
+        b.to_string()
+    } else if b.ends_with("/v1") {
+        format!("{b}/chat/completions")
+    } else {
+        format!("{b}/v1/chat/completions")
+    };
+    let client = http_client(30).map_err(|e| e)?;
+    let payload = serde_json::json!({
+        "model": if model.trim().is_empty() { "gpt-4o-mini".to_string() } else { model.trim().to_string() },
+        "messages": [{"role":"user","content":"ping"}],
+        "max_tokens": 1,
+        "stream": false
+    });
+    let mut rb = client.post(&url).json(&payload);
+    if !key.trim().is_empty() {
+        rb = rb.bearer_auth(key.trim());
+    }
+    match rb.send().await {
+        Ok(r) => {
+            let st = r.status();
+            if st.is_success() {
+                Ok(format!("连接正常 (HTTP {})", st.as_u16()))
+            } else {
+                let body = r.text().await.unwrap_or_default();
+                let snippet: String = body.chars().take(160).collect();
+                Err(format!("HTTP {}：{}", st.as_u16(), snippet))
+            }
+        }
+        Err(e) => Err(format!("请求失败：{e}")),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -627,7 +666,8 @@ pub fn run() {
             generate_images,
             read_saved_image,
             configure_gateway,
-            gateway_url
+            gateway_url,
+            test_chat_base
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

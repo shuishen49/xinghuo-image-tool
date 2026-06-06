@@ -255,6 +255,19 @@ fn serve_embedded(path: &str) -> Response {
     }
 }
 
+fn gateway_image_ref(src: &str, self_port: u16) -> String {
+    let s = src.trim();
+    if s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("data:")
+        || s.is_empty()
+    {
+        return s.to_string();
+    }
+    let clean = s.trim_start_matches("./").trim_start_matches('/');
+    format!("http://127.0.0.1:{self_port}/{clean}")
+}
+
 // ============= health =============
 
 async fn health_handler(State((cfg, _)): State<(SharedConfig, DubbingState)>) -> Response {
@@ -356,10 +369,10 @@ async fn handle_scene_variant(
         return err_json(StatusCode::BAD_REQUEST,
             json!({"error":{"type":"missing_field","message":"缺少 imageUrl / prompt"}}));
     }
-    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
+    let (img_base, img_key, img_model, img_upload_url, img_timeout, self_port) = {
         let g = cfg.read().unwrap();
         (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout)
+         g.img_upload_url.clone(), g.img_timeout, g.self_port)
     };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE,
@@ -368,7 +381,7 @@ async fn handle_scene_variant(
     let model = if img_model.is_empty() { "gpt-5-4-thinking" } else { img_model.as_str() };
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 120 } else { img_timeout };
-    let refs = vec![img];
+    let refs = vec![gateway_image_ref(&img, self_port)];
     match crate::run_generation(&img_base, &img_key, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
@@ -396,18 +409,21 @@ async fn handle_lobster_task(
     let prompt = (!p.image_prompt.is_empty()).then(|| p.image_prompt.clone())
         .unwrap_or_default();
 
-    let mut refs: Vec<String> = Vec::new();
-    for u in [&p.image_url, &p.source_image_url] {
-        if !u.is_empty() { refs.push(u.clone()); }
-    }
-    for cr in &p.character_refs { if !cr.image_url.is_empty() { refs.push(cr.image_url.clone()); } }
-    refs.dedup();
-
-    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
+    let (img_base, img_key, img_model, img_upload_url, img_timeout, self_port) = {
         let g = cfg.read().unwrap();
         (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout)
+         g.img_upload_url.clone(), g.img_timeout, g.self_port)
     };
+
+    let mut refs: Vec<String> = Vec::new();
+    for u in [&p.image_url, &p.source_image_url] {
+        if !u.is_empty() { refs.push(gateway_image_ref(u, self_port)); }
+    }
+    for cr in &p.character_refs {
+        if !cr.image_url.is_empty() { refs.push(gateway_image_ref(&cr.image_url, self_port)); }
+    }
+    refs.dedup();
+
     if img_base.is_empty() || img_key.is_empty() {
         return ok_json(json!({"result":{"ok":false,"error":"no image api configured"}}));
     }
@@ -755,42 +771,41 @@ async fn handle_chat(
             json!({"error":{"message":"聊天接口未配置 API Key，请在设置页的「漫剧工作台 · 聊天接口」填写"}}));
     }
 
-    // Try up to 3 times, with increasing timeout per attempt.
-    for attempt in 1..=3u32 {
-        let timeout = if attempt == 1 { 480 } else { 600 };
-        let client = match crate::http_client(timeout) {
-            Ok(c) => c,
-            Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})),
-        };
-        let rb = client.post(&url).json(&body).bearer_auth(&key);
+    // Force streaming on the upstream call. A long generation (e.g. story
+    // segmentation) makes a non-streaming request hang until the upstream nginx
+    // idle-timeout fires a 504. With stream=true the upstream emits SSE chunks
+    // continuously, keeping the connection alive, and we pipe them straight to
+    // the client. The frontend reassembles the SSE deltas.
+    body["stream"] = json!(true);
 
-        match rb.send().await {
-            Ok(r) => {
-                let st = r.status();
+    // Long timeout for the whole stream; SSE keeps the socket busy so this is
+    // a safety cap, not the thing that usually fires.
+    let client = match crate::http_client(900) {
+        Ok(c) => c,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})),
+    };
+    let rb = client.post(&url).json(&body).bearer_auth(&key);
+
+    match rb.send().await {
+        Ok(r) => {
+            let st = r.status();
+            if !st.is_success() {
+                // Surface upstream error body verbatim (often JSON or an nginx page)
                 let t = r.text().await.unwrap_or_default();
-                // If upstream nginx timed out (504), retry
-                if st.as_u16() == 504 && attempt < 3 {
-                    eprintln!("[gateway] chat upstream 504, retry {attempt}/3…");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
                 return Response::builder().status(st)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(t)).unwrap();
             }
-            Err(e) => {
-                if attempt < 3 {
-                    eprintln!("[gateway] chat request failed (attempt {attempt}/3): {e}");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-                return err_json(StatusCode::BAD_GATEWAY,
-                    json!({"error":{"message":format!("聊天接口请求失败：{e}")}}));
-            }
+            // Stream the SSE body straight through, no buffering.
+            let stream = r.bytes_stream();
+            Response::builder().status(st)
+                .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from_stream(stream)).unwrap()
         }
+        Err(e) => err_json(StatusCode::BAD_GATEWAY,
+            json!({"error":{"message":format!("聊天接口请求失败：{e}")}})),
     }
-    // unreachable
-    err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":"chat exhausted retries"}}))
 }
 
 fn chat_url(base: &str) -> String {

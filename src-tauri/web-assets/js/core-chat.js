@@ -189,55 +189,12 @@ function normalizeApiPath(path=''){
 }
 
 function getChatConfig(){
-  let stored = {};
-  try {
-    const raw = localStorage.getItem(CHAT_CONFIG_KEY);
-    stored = raw ? JSON.parse(raw) : {};
-  } catch {}
-  const base = getQueryParam('chatBase') || stored.base || getDefaultChatBase();
-  const path = getQueryParam('chatPath') || stored.path || DEFAULT_CHAT_PATH;
-  const model = getQueryParam('chatModel') || stored.model || '';
-  const apiKey = getQueryParam('chatKey') || stored.apiKey || '';
-
-  const normalizedBase = normalizeBaseUrl(base);
-  const normalizedPath = normalizeApiPath(path);
-  let normalizedModel = String(model || '').trim() || 'gpt-5.5';
-
-  // Gateway forwards to the configured sub2api upstream; the Rust-side
-  // chatBackend settings override the model. No lobster/provider remapping.
-
   return {
-    base: normalizedBase,
-    path: normalizedPath,
-    model: normalizedModel,
-    apiKey: String(apiKey || '').trim(),
+    base: getDefaultChatBase(),
+    path: DEFAULT_CHAT_PATH,
+    model: 'gpt-4o-mini',
+    apiKey: '',
   };
-}
-
-function saveChatConfig(){
-  const cfg = {
-    base: normalizeBaseUrl(q('chatApiBase')?.value || ''),
-    path: normalizeApiPath(q('chatApiPath')?.value || ''),
-    model: String(q('chatModel')?.value || '').trim(),
-    apiKey: String(q('chatApiKey')?.value || '').trim(),
-  };
-  try { localStorage.setItem(CHAT_CONFIG_KEY, JSON.stringify(cfg)); } catch {}
-  fillChatConfigUi();
-  setChatStatus('聊天接口配置已保存。', true);
-}
-
-function resetChatConfig(){
-  try { localStorage.removeItem(CHAT_CONFIG_KEY); } catch {}
-  fillChatConfigUi();
-  setChatStatus('已恢复默认配置。', true);
-}
-
-function fillChatConfigUi(){
-  const cfg = getChatConfig();
-  if(q('chatApiBase')) q('chatApiBase').value = cfg.base;
-  if(q('chatApiPath')) q('chatApiPath').value = cfg.path;
-  if(q('chatModel')) q('chatModel').value = cfg.model;
-  if(q('chatApiKey')) q('chatApiKey').value = cfg.apiKey;
 }
 
 function setChatStatus(text='', ok=null){
@@ -624,6 +581,41 @@ function normalizeAssistantContent(content){
   return '';
 }
 
+// Parse an SSE stream (OpenAI streaming format) and accumulate delta content.
+// The gateway forwards the upstream as text/event-stream to dodge nginx 504
+// on long generations; we reassemble the full message here.
+async function readSseStream(resp){
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let full = '';
+  while(true){
+    const { done, value } = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // Process complete SSE events (separated by \n\n or \n)
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // keep the incomplete last line
+    for(const line of lines){
+      const trimmed = line.trim();
+      if(!trimmed || !trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if(payload === '[DONE]') continue;
+      try {
+        const obj = JSON.parse(payload);
+        const delta = obj?.choices?.[0]?.delta?.content
+          || obj?.choices?.[0]?.message?.content
+          || obj?.output_text
+          || '';
+        if(delta) full += delta;
+      } catch {
+        // Non-JSON data line; could be an error page chunk — ignore.
+      }
+    }
+  }
+  return full.trim();
+}
+
 async function doChatRequest(url, body, headers, signal){
   const resp = await fetch(url, {
     method: 'POST',
@@ -631,13 +623,29 @@ async function doChatRequest(url, body, headers, signal){
     body: JSON.stringify(body),
     signal,
   });
-  const rawText = await resp.text();
-  let data = null;
-  try { data = rawText ? JSON.parse(rawText) : null; } catch {}
+
   if(!resp.ok){
+    const rawText = await resp.text();
+    let data = null;
+    try { data = rawText ? JSON.parse(rawText) : null; } catch {}
     const detail = data?.error?.message || data?.message || rawText || `HTTP ${resp.status}`;
     throw new Error(detail);
   }
+
+  const ctype = String(resp.headers.get('content-type') || '').toLowerCase();
+
+  // Streaming response (SSE) — gateway forwards upstream as text/event-stream.
+  if(ctype.includes('text/event-stream') && resp.body && resp.body.getReader){
+    const out = await readSseStream(resp);
+    if(isLikelyServiceUnavailable(out)) throw new Error(out);
+    if(!out) throw new Error('接口返回空内容（流式）');
+    return out;
+  }
+
+  // Fallback: non-streaming JSON response.
+  const rawText = await resp.text();
+  let data = null;
+  try { data = rawText ? JSON.parse(rawText) : null; } catch {}
 
   const c0 = data?.choices?.[0]?.message?.content;
   const c1 = data?.choices?.[0]?.delta?.content;
@@ -712,23 +720,8 @@ async function requestChatCompletion(userText, options = {}){
       ? { ...body, model: fallbackModel }
       : body;
     const reply = await doChatRequest(fallbackUrl, retryBody, headers, signal);
-    try {
-      const nextCfg = { ...cfg, path: DEFAULT_CHAT_PATH };
-      localStorage.setItem(CHAT_CONFIG_KEY, JSON.stringify(nextCfg));
-      fillChatConfigUi();
-    } catch {}
     setChatStatus(`检测到聊天路径无效，已自动切回默认 ${DEFAULT_CHAT_PATH}`, true);
     return reply;
-  }
-}
-
-async function testChatConfig(){
-  try {
-    setChatStatus('正在测试连接…');
-    const reply = await requestChatCompletion('请只回复：连接正常');
-    setChatStatus(`连接成功：${reply || '已返回空文本'}`, true);
-  } catch (err) {
-    setChatStatus(`连接失败：${err?.message || err}`, false);
   }
 }
 
@@ -1263,4 +1256,3 @@ window.skipOutlineEdit = skipOutlineEdit;
 (function initChatPaneCollapse(){
   applyChatPaneCollapsedState(readChatPaneCollapsed());
 })();
-
