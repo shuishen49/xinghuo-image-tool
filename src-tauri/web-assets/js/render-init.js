@@ -103,12 +103,58 @@ function saveProjectManualSegmentsMap(map = {}){
   try { localStorage.setItem(PROJECT_MANUAL_SEGMENTS_KEY, JSON.stringify(map || {})); } catch {}
 }
 
+function manualSegmentsApiUrl(search = ''){
+  const u = new URL('/api/manual-segments', window.location.href);
+  if(search) u.search = search;
+  return u.toString();
+}
+
+async function saveProjectManualSegmentsToDisk(project = '', segments = []){
+  const p = String(project || '').trim();
+  if(!p) return false;
+  try{
+    const resp = await fetch(manualSegmentsApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: p, segments: Array.isArray(segments) ? segments : [] }),
+    });
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    console.info('[manual-segments] saved', { project: p, count: Array.isArray(segments) ? segments.length : 0 });
+    return true;
+  }catch(err){
+    console.warn('[manual-segments] save failed', { project: p, error: err });
+    return false;
+  }
+}
+
+async function loadProjectManualSegmentsFromDisk(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return [];
+  try{
+    const resp = await fetch(manualSegmentsApiUrl(`?project=${encodeURIComponent(p)}&t=${Date.now()}`));
+    if(!resp.ok) return [];
+    const data = await resp.json();
+    const rows = Array.isArray(data?.segments) ? data.segments : [];
+    if(data?.ok && rows.length){
+      const map = readProjectManualSegmentsMap();
+      map[p] = rows;
+      saveProjectManualSegmentsMap(map);
+      console.info('[manual-segments] loaded', { project: p, count: rows.length });
+    }
+    return rows;
+  }catch(err){
+    console.warn('[manual-segments] load failed', { project: p, error: err });
+    return [];
+  }
+}
+
 function setProjectManualSegments(project = '', segments = []){
   const p = String(project || '').trim();
   if(!p) return;
   const map = readProjectManualSegmentsMap();
   map[p] = Array.isArray(segments) ? segments : [];
   saveProjectManualSegmentsMap(map);
+  saveProjectManualSegmentsToDisk(p, map[p]);
 }
 
 function getProjectManualSegments(project = ''){
@@ -1039,6 +1085,7 @@ function refreshSegmentCastCell(project, sid){
 }
 
 let currentSegmentCastModal = null;
+let currentSegmentCastRename = null;
 
 function getCastCandidateMeta(){
   const project = String(currentProjectName || '').trim();
@@ -1157,6 +1204,12 @@ function ensureSceneRemixEditorStyles(){
     }
     .scene-remix-title::before { content: '🎨'; font-size: 18px; }
     .scene-remix-actions { display: flex; align-items: center; gap: 8px; }
+    .scene-remix-toggle {
+      display:inline-flex; align-items:center; gap:6px; padding:6px 9px; border-radius:8px;
+      border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.04);
+      color:#cbd5e1; font-size:12px; user-select:none; cursor:pointer;
+    }
+    .scene-remix-toggle input { margin:0; accent-color:#22d3ee; }
     .scene-remix-btn {
       padding: 8px 14px;
       border-radius: 8px;
@@ -1295,6 +1348,28 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
   const currentSceneImageUrl = getProjectSceneImageDraft(p, s);
   const currentStoryboardImageUrl = String(img || getStoryboardImageUrlFromSegment(p, s) || '').trim();
 
+  const buildStoryboardGridPrompt = (basePrompt = '', scriptText = '', cast = []) => {
+    const projectTitle = p || 'Storyboard Project';
+    const castLine = (Array.isArray(cast) && cast.length) ? cast.join(', ') : 'the main characters from the script';
+    return [
+      `A comprehensive, structured multi-panel film production storyboard grid for project "${projectTitle}", focused on storyboard segment ${s || 'S01'}.`,
+      'Dark modern technical interface style, deep navy background with warm amber accents, highly detailed cinematic concept art, digital painting, professional game/film storyboard board.',
+      'Multi-section layout: a top horizontal banner for project metadata; a left vertical sidebar dedicated to character reference details; a large central asymmetrical grid of 7 numbered narrative panels; a top-right environment and scene design section; a bottom horizontal footer timeline with an Emotion Curve diagram.',
+      `Character reference sidebar: focus on ${castLine}; include full-body reference, profile pose, back view, facial close-up, hands/detail close-up, and descriptive placeholder labels.`,
+      'Main body: 7 numbered narrative panels (1 to 7), each panel has cinematic composition, clear camera language, placeholder technical captions such as WS, CU, POV, camera movement, mood, lighting, editing notes. Keep a consistent character and environment across all panels.',
+      'Top-right environment section: include a 3D perspective concept view plus a detailed annotated top-down aerial map with camera paths and markers 1-7.',
+      'Bottom footer: schematic Emotion Curve timeline with five distinct icons and text-label placeholders, showing emotional progression from tension to discovery to resolution.',
+      'Clear typography-like placeholder text for titles, labels, captions, grid lines and technical symbols throughout. Text may be placeholder glyphs; prioritize layout, panel hierarchy, and cinematic visual consistency.',
+      'Use a single finished storyboard sheet, not a single illustration. Keep 9:16 vertical composition if required by the generation model, but the content must read as one professional storyboard layout.',
+      '',
+      'Source segment script:',
+      scriptText || '(empty script)',
+      '',
+      'User visual requirements:',
+      basePrompt || '(no extra requirements)',
+    ].join('\n');
+  };
+
   const mask = document.createElement('div');
   mask.className = 'scene-remix-mask';
   mask.innerHTML = `
@@ -1302,6 +1377,10 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
       <div class="scene-remix-head">
         <h3 class="scene-remix-title">图片二创 - 分镜 #${escapeHtml(s || '-')}</h3>
         <div class="scene-remix-actions">
+          <label class="scene-remix-toggle" title="勾选后生成多分镜专业故事板布局图">
+            <input type="checkbox" data-role="storyboard-grid-mode" />
+            <span>故事板布局</span>
+          </label>
           <button type="button" data-act="cancel" class="scene-remix-btn">关闭</button>
           <button type="button" data-act="apply" class="scene-remix-btn primary">生成二创图</button>
         </div>
@@ -1357,6 +1436,7 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
   const historyList = mask.querySelector('[data-role="history-list"]');
   const applyBtn = mask.querySelector('button[data-act="apply"]');
   const cancelBtn = mask.querySelector('button[data-act="cancel"]');
+  const storyboardGridToggle = mask.querySelector('input[data-role="storyboard-grid-mode"]');
   const modeBtns = [...mask.querySelectorAll('[data-role="ref-mode"]')];
 
   // Auto-save remix prompt draft on edit
@@ -1372,6 +1452,12 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
       setProjectRemixNegativePromptDraft(p, s, negativeEditor.value);
     });
   }
+  storyboardGridToggle?.addEventListener('change', () => {
+    if(applyBtn) applyBtn.textContent = storyboardGridToggle.checked ? '生成故事板图' : '生成二创图';
+    if(hint) hint.textContent = storyboardGridToggle.checked
+      ? '已启用故事板布局：会生成一张多分镜专业 storyboard sheet，文字以占位符为主。'
+      : '已关闭故事板布局：按当前提示词生成普通二创图。';
+  });
 
   let mode = currentStoryboardImageUrl ? 'storyboard' : (currentSceneImageUrl ? 'scene' : 'text');
   let currentBaseUrl = img;
@@ -1445,6 +1531,18 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
     }).join('');
 
     historyList.querySelectorAll('[data-role="pick-history"]').forEach(btn => {
+      const wrap = btn.closest('div[style*="position:relative"]');
+      const url = String(btn.getAttribute('data-url') || '').trim();
+      if(wrap && url && !wrap.querySelector('[data-role="zoom-history"]')){
+        const zoomBtn = document.createElement('button');
+        zoomBtn.type = 'button';
+        zoomBtn.setAttribute('data-role', 'zoom-history');
+        zoomBtn.setAttribute('data-url', url);
+        zoomBtn.title = '放大查看';
+        zoomBtn.textContent = '⛶';
+        zoomBtn.style.cssText = 'position:absolute;left:2px;bottom:2px;z-index:4;border:1px solid rgba(255,255,255,.42);border-radius:999px;background:linear-gradient(180deg,rgba(20,20,24,.92),rgba(0,0,0,.88));color:#e0f2fe;width:28px;height:28px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 6px 14px rgba(0,0,0,.45);backdrop-filter:blur(1px);font-size:13px;line-height:1;';
+        wrap.appendChild(zoomBtn);
+      }
       btn.addEventListener('click', () => {
         const picked = String(btn.getAttribute('data-url') || '').trim();
         if(!picked) return;
@@ -1455,6 +1553,21 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
         renderHistory();
         refreshMode();
         if(hint) hint.textContent = '已切换到历史图作为当前参考图，可直接继续二创。';
+      });
+      btn.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const picked = String(btn.getAttribute('data-url') || '').trim();
+        if(picked && typeof openLightbox === 'function') openLightbox(picked, `${s}-history`);
+      });
+    });
+
+    historyList.querySelectorAll('[data-role="zoom-history"]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const picked = String(btn.getAttribute('data-url') || '').trim();
+        if(picked && typeof openLightbox === 'function') openLightbox(picked, `${s}-history`);
       });
     });
 
@@ -1568,9 +1681,11 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
     }
     const oldText = applyBtn.textContent;
     applyBtn.disabled = true;
-    applyBtn.textContent = '生成中…';
+    const useStoryboardGridForStatus = !!storyboardGridToggle?.checked;
+    applyBtn.textContent = useStoryboardGridForStatus ? '故事板生成中…' : '生成中…';
     if(hint){
-      if(mode === 'scene') hint.textContent = '正在基于当前场景图生成分镜图…';
+      if(useStoryboardGridForStatus) hint.textContent = '正在生成多分镜专业故事板布局图…';
+      else if(mode === 'scene') hint.textContent = '正在基于当前场景图生成分镜图…';
       else if(mode === 'storyboard') hint.textContent = '正在基于当前分镜图生成二创图…';
       else hint.textContent = '正在按提示词生成分镜图…';
     }
@@ -1586,17 +1701,19 @@ function openSceneImageVariantEditor(project = '', sid = '', imageUrl = ''){
       const sourceUrl = mode === 'scene'
         ? String(currentSceneImageUrl || '').trim()
         : String(currentBaseUrl || activeUrl || currentStoryboardImageUrl || img || '').trim();
+      const useStoryboardGrid = !!storyboardGridToggle?.checked;
+      const finalPrompt = useStoryboardGrid ? buildStoryboardGridPrompt(prompt, scriptText, cast) : prompt;
       const taskPayload = {
         project: p,
         segmentId: s,
         script: scriptText,
-        imagePrompt: prompt,
+        imagePrompt: finalPrompt,
         cast,
         characterRefs,
         sceneOnly: false,
       };
       const negPrompt = String(negativeEditor?.value || '').trim();
-      if(negPrompt) taskPayload.imagePrompt = `${prompt}\n\n反向提示词（不要出现）：${negPrompt}`;
+      if(negPrompt) taskPayload.imagePrompt = `${finalPrompt}\n\n反向提示词（不要出现）：${negPrompt}`;
       if((mode === 'scene' || mode === 'storyboard') && sourceUrl){
         taskPayload.imageUrl = sourceUrl;
         taskPayload.sourceImageUrl = sourceUrl;
@@ -1782,16 +1899,27 @@ function renderSegmentCastModalRows(){
     const nameEnc = encodeURIComponent(String(c.name || ''));
     const projectEnc = encodeURIComponent(String(project || ''));
     const sidEnc = encodeURIComponent(String(sid || ''));
+    const isRenaming = currentSegmentCastRename
+      && currentSegmentCastRename.project === project
+      && currentSegmentCastRename.sid === sid
+      && currentSegmentCastRename.name === String(c.name || '');
+    const nameCell = isRenaming
+      ? `<div style="display:flex;gap:6px;align-items:center;min-width:180px;">
+          <input data-role="rename-cast-input" value="${escapeHtml(c.name)}" style="width:150px;border-radius:8px;border:1px solid rgba(255,255,255,.18);background:rgba(2,6,23,.72);color:#f8fafc;padding:6px 8px;" />
+          <button type="button" class="btn-primary" data-role="save-rename-cast" data-project="${projectEnc}" data-sid="${sidEnc}" data-name="${nameEnc}">保存</button>
+          <button type="button" class="btn-ghost" data-role="cancel-rename-cast">取消</button>
+        </div>`
+      : escapeHtml(c.name);
     return `
       <tr class="segment-cast-row">
         <td><input type="checkbox" ${checked} onchange="toggleSegmentCastModalSelect('${escapeHtml(project)}','${escapeHtml(sid)}','${escapeHtml(c.name)}', this.checked)" /></td>
-        <td>${escapeHtml(c.name)}</td>
+        <td>${nameCell}</td>
         <td>${escapeHtml(c.notes || '-')}</td>
         <td>${c.imageUrl ? `<a href="javascript:void(0)" class="segment-cast-thumb" data-img="${escapeHtml(c.imageUrl)}" data-sid="${escapeHtml(c.name)}"><img src="${escapeHtml(c.imageUrl)}" alt="${escapeHtml(c.name)}" class="segment-cast-avatar"/></a>` : `<button type="button" class="cast-upload-btn" title="上传角色图片" onclick="uploadCastCharacterImage('${escapeHtml(c.name)}')">上传图片</button>`}</td>
         <td>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button type="button" class="btn-ghost" onclick="renameSegmentCastCandidate('${projectEnc}','${sidEnc}','${nameEnc}')">改名</button>
-            <button type="button" class="btn-ghost" onclick="deleteSegmentCastCandidate('${projectEnc}','${sidEnc}','${nameEnc}')">删除</button>
+            <button type="button" class="btn-ghost" data-role="rename-cast" data-project="${projectEnc}" data-sid="${sidEnc}" data-name="${nameEnc}">改名</button>
+            <button type="button" class="btn-ghost" data-role="delete-cast" data-project="${projectEnc}" data-sid="${sidEnc}" data-name="${nameEnc}">删除</button>
           </div>
         </td>
       </tr>
@@ -1876,15 +2004,27 @@ function uploadCastCharacterImage(characterName){
   input.click();
 }
 
-function renameSegmentCastCandidate(projectEnc, sidEnc, nameEnc){
-  if(!currentSegmentCastModal) return;
+function applySegmentCastRename(projectEnc, sidEnc, nameEnc, nextNameRaw = ''){
+  if(!currentSegmentCastModal){
+    console.warn('[segment-cast] rename ignored: modal not open');
+    setStatus('改名失败：角色弹窗未打开', false);
+    return;
+  }
   const project = decodeURIComponent(String(projectEnc || ''));
   const sid = decodeURIComponent(String(sidEnc || ''));
   const oldName = decodeURIComponent(String(nameEnc || '')).trim();
-  if(!oldName) return;
+  if(!oldName){
+    console.warn('[segment-cast] rename ignored: empty old name', { project, sid });
+    setStatus('改名失败：旧角色名为空', false);
+    return;
+  }
 
-  const nextName = String(prompt('请输入新角色名：', oldName) || '').trim();
-  if(!nextName || nextName === oldName) return;
+  const nextName = String(nextNameRaw || '').trim();
+  console.info('[segment-cast] rename apply', { project, sid, oldName, nextName });
+  if(!nextName || nextName === oldName){
+    setStatus(nextName === oldName ? '角色名未变化' : '已取消改名');
+    return;
+  }
 
   const exists = (currentSegmentCastModal.candidates || []).some(x => String(x?.name || '').trim() === nextName);
   if(exists){
@@ -1904,8 +2044,51 @@ function renameSegmentCastCandidate(projectEnc, sidEnc, nameEnc){
   }
   currentSegmentCastModal.selected = selected;
 
+  const saved = getProjectSegmentCast(project, sid);
+  if(saved.includes(oldName)){
+    setProjectSegmentCast(project, sid, saved.map(x => x === oldName ? nextName : x));
+    refreshSegmentCastCell(project, sid);
+  }
+
+  const imageOverrides = readProjectCharacterImageOverrides();
+  const row = imageOverrides[project] && typeof imageOverrides[project] === 'object' ? imageOverrides[project] : null;
+  if(row){
+    const oldKey = normalizeCharacterNameKey(oldName);
+    const nextKey = normalizeCharacterNameKey(nextName);
+    if(row[oldKey] && !row[nextKey]){
+      row[nextKey] = row[oldKey];
+      delete row[oldKey];
+      saveProjectCharacterImageOverrides(imageOverrides);
+    }
+  }
+
   renderSegmentCastModalRows();
+  renderSegmentCastGlobalPicker();
+  currentSegmentCastRename = null;
   setStatus(`已将 ${sid} 的候选角色改名：${oldName} → ${nextName}`);
+}
+
+function renameSegmentCastCandidate(projectEnc, sidEnc, nameEnc){
+  if(!currentSegmentCastModal){
+    console.warn('[segment-cast] rename ignored: modal not open');
+    setStatus('改名失败：角色弹窗未打开', false);
+    return;
+  }
+  const project = decodeURIComponent(String(projectEnc || ''));
+  const sid = decodeURIComponent(String(sidEnc || ''));
+  const oldName = decodeURIComponent(String(nameEnc || '')).trim();
+  if(!oldName){
+    console.warn('[segment-cast] rename ignored: empty old name', { project, sid });
+    setStatus('改名失败：旧角色名为空', false);
+    return;
+  }
+  currentSegmentCastRename = { project, sid, name: oldName };
+  renderSegmentCastModalRows();
+  setTimeout(() => {
+    const input = q('segmentCastRows')?.querySelector?.('input[data-role="rename-cast-input"]');
+    input?.focus?.();
+    input?.select?.();
+  }, 0);
 }
 
 function deleteSegmentCastCandidate(projectEnc, sidEnc, nameEnc){
@@ -2344,6 +2527,29 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
   const videoPromptDraftMap = getProjectVideoPromptDraftMap(project);
   const swapSceneAndStoryboard = String(project || '').trim() === 'episode-20260426-215925';
 
+  if(!Array.isArray(segments) || !segments.length){
+    tbody.innerHTML = `
+      <tr class="storyboard-empty-row">
+        <td>
+          <div class="row-index-cell">
+            <button class="row-add-btn" type="button" onclick="addManualScriptSegment()" title="新增第一段">+</button>
+          </div>
+        </td>
+        <td colspan="8">
+          <div class="storyboard-empty-box">
+            <div>当前还没有剧情分段。可以手动新增一段，或从上方故事大纲自动分段。</div>
+            <div class="storyboard-empty-actions">
+              <button class="btn-ghost" type="button" onclick="oneClickSegmentStory()">一键剧情分段</button>
+            </div>
+          </div>
+        </td>
+      </tr>
+    `;
+    bindStoryboardTopScroll();
+    setStatus(`已加载 ${project} ｜ segments: 0`);
+    return;
+  }
+
   segments.forEach((seg, idx)=>{
     const sid = String(seg.segmentId || seg.id || `S${String(idx+1).padStart(2,'0')}`);
     const script = composeScript(seg);
@@ -2400,7 +2606,13 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${idx+1}</td>
+      <td>
+        <div class="row-index-cell">
+          <div class="row-index-num">${idx+1}</div>
+          <button class="row-add-btn" type="button" onclick="addManualScriptSegment('${encodeURIComponent(sid)}')" title="在此段后新增">+</button>
+          <button class="row-action-btn row-delete-btn" type="button" onclick="deleteManualScriptSegment('${encodeURIComponent(sid)}')" title="删除此段">-</button>
+        </div>
+      </td>
       <td>
         <div class="meta">${sid}</div>
         <textarea class="script-input" data-sid="${escapeHtml(sid)}">${script}</textarea>
@@ -2605,7 +2817,20 @@ function persistManualScriptsByRows(project = '', rows = []){
     };
   };
 
-  const manualSegments = getProjectManualSegments(p);
+  let manualSegments = getProjectManualSegments(p);
+  if(!Array.isArray(manualSegments) || !manualSegments.length){
+    manualSegments = [...document.querySelectorAll('#tbody tr')].map((tr, idx) => {
+      const sid = String(tr.querySelector('td:nth-child(2) .meta')?.textContent || `S${String(idx + 1).padStart(2, '0')}`).trim();
+      const scriptText = String(tr.querySelector('td:nth-child(2) textarea.script-input, td:nth-child(2) textarea')?.value || '').replace(/\r/g, '').trim();
+      return {
+        id: sid,
+        segmentId: sid,
+        durationSec: undefined,
+        type: '',
+        ...parseScriptToFields(scriptText),
+      };
+    }).filter(seg => String(seg.segmentId || seg.id || '').trim());
+  }
   if(Array.isArray(manualSegments) && manualSegments.length){
     const nextSegments = manualSegments.map(seg => {
       const sid = String(seg?.segmentId || seg?.id || '').trim();
@@ -2631,6 +2856,177 @@ function persistManualScriptsByRows(project = '', rows = []){
     });
   }
 }
+
+function collectManualSegmentsFromTable(fallbackSegments = []){
+  const fallbackBySid = {};
+  (Array.isArray(fallbackSegments) ? fallbackSegments : []).forEach((seg) => {
+    const sid = String(seg?.segmentId || seg?.id || '').trim();
+    if(sid) fallbackBySid[sid] = seg;
+  });
+  return [...document.querySelectorAll('#tbody tr')].map((tr, idx) => {
+    const sid = String(tr.querySelector('td:nth-child(2) .meta')?.textContent || `S${String(idx + 1).padStart(2, '0')}`).trim();
+    const script = String(tr.querySelector('td:nth-child(2) textarea.script-input, td:nth-child(2) textarea')?.value || '').replace(/\r/g, '').trim();
+    const old = fallbackBySid[sid] || {};
+    return {
+      ...old,
+      id: sid,
+      segmentId: sid,
+      durationSec: old.durationSec,
+      type: String(old.type || '').trim(),
+      scene: String(old.scene || script || '').trim(),
+      visual: String(old.visual || old.action || '').trim(),
+      action: String(old.action || old.visual || '').trim(),
+      dialogue: String(old.dialogue || '').trim(),
+      text: script,
+      script,
+    };
+  }).filter(seg => String(seg.segmentId || seg.id || '').trim());
+}
+
+function nextManualSegmentId(segments = []){
+  let max = 0;
+  segments.forEach((seg, idx) => {
+    const raw = String(seg?.segmentId || seg?.id || '').trim();
+    const m = raw.match(/^S(\d+)$/i);
+    const n = m ? Number(m[1]) : idx + 1;
+    if(Number.isFinite(n)) max = Math.max(max, n);
+  });
+  return `S${String(max + 1).padStart(2, '0')}`;
+}
+
+function renumberManualSegments(segments = []){
+  return (Array.isArray(segments) ? segments : []).map((seg, idx) => {
+    const sid = `S${String(idx + 1).padStart(2, '0')}`;
+    return {
+      ...seg,
+      id: sid,
+      segmentId: sid,
+    };
+  });
+}
+
+function addManualScriptSegment(afterSid = ''){
+  try { afterSid = decodeURIComponent(String(afterSid || '')); } catch {}
+  let queryProject = '';
+  try { queryProject = new URL(window.location.href).searchParams.get('project') || ''; } catch {}
+  const project = String((latestRenderContext && latestRenderContext.project) || latestOutlineProject || currentProjectName || getProject() || queryProject || '').trim();
+  if(!project){
+    setStatus('请先进入项目，再新增剧情段。', false);
+    return;
+  }
+
+  const fallback = getProjectManualSegments(project).length
+    ? getProjectManualSegments(project)
+    : (Array.isArray(latestOutlineSegments) ? latestOutlineSegments : []);
+  const existing = collectManualSegmentsFromTable(fallback);
+  const rawSid = nextManualSegmentId(existing);
+  const newSegment = {
+    id: rawSid,
+    segmentId: rawSid,
+    durationSec: undefined,
+    type: '',
+    scene: '',
+    visual: '',
+    action: '',
+    dialogue: '',
+    text: '',
+    script: '',
+  };
+  let nextSegments = [...existing, newSegment];
+  let insertedIndex = existing.length;
+  const after = String(afterSid || '').trim();
+  if(after){
+    const insertAt = existing.findIndex(seg => String(seg?.segmentId || seg?.id || '').trim() === after);
+    if(insertAt >= 0){
+      insertedIndex = insertAt + 1;
+      nextSegments = [
+        ...existing.slice(0, insertAt + 1),
+        newSegment,
+        ...existing.slice(insertAt + 1),
+      ];
+    }
+  }
+  nextSegments = renumberManualSegments(nextSegments);
+  const sid = String(nextSegments[Math.min(insertedIndex, nextSegments.length - 1)]?.segmentId || rawSid).trim();
+  setProjectManualSegments(project, nextSegments);
+  latestOutlineSegments = nextSegments.slice();
+
+  const ctx = latestRenderContext || {
+    project,
+    promptMap: {},
+    bindingMap: {},
+    videoMap: {},
+    multiShotMap: {},
+    videoPromptMap: {},
+    grid4ImageMap: {},
+  };
+  render(
+    project,
+    normalizeSegments(nextSegments),
+    ctx.promptMap || {},
+    ctx.bindingMap || {},
+    ctx.videoMap || {},
+    ctx.multiShotMap || {},
+    ctx.videoPromptMap || {},
+    ctx.grid4ImageMap || {}
+  );
+
+  const area = [...document.querySelectorAll('#tbody textarea.script-input[data-sid]')]
+    .find(el => String(el.getAttribute('data-sid') || '').trim() === sid);
+  area?.focus?.();
+  setStatus(`已新增剧情段 ${sid}，可直接填写 Script。`);
+}
+
+window.addManualScriptSegment = addManualScriptSegment;
+
+function deleteManualScriptSegment(targetSid = ''){
+  try { targetSid = decodeURIComponent(String(targetSid || '')); } catch {}
+  let queryProject = '';
+  try { queryProject = new URL(window.location.href).searchParams.get('project') || ''; } catch {}
+  const project = String((latestRenderContext && latestRenderContext.project) || latestOutlineProject || currentProjectName || getProject() || queryProject || '').trim();
+  const sid = String(targetSid || '').trim();
+  if(!project || !sid){
+    setStatus('删除失败：缺少项目或分段编号', false);
+    return;
+  }
+  const fallback = getProjectManualSegments(project).length
+    ? getProjectManualSegments(project)
+    : (Array.isArray(latestOutlineSegments) ? latestOutlineSegments : []);
+  const existing = collectManualSegmentsFromTable(fallback);
+  const target = existing.find(seg => String(seg?.segmentId || seg?.id || '').trim() === sid);
+  const scriptText = String(target?.script || target?.text || target?.scene || '').trim();
+  if(scriptText){
+    const ok = confirm(`确认删除分段 ${sid}？\n\n${scriptText.slice(0, 80)}`);
+    if(!ok) return;
+  }
+
+  const nextSegments = renumberManualSegments(existing.filter(seg => String(seg?.segmentId || seg?.id || '').trim() !== sid));
+  setProjectManualSegments(project, nextSegments);
+  latestOutlineSegments = nextSegments.slice();
+
+  const ctx = latestRenderContext || {
+    project,
+    promptMap: {},
+    bindingMap: {},
+    videoMap: {},
+    multiShotMap: {},
+    videoPromptMap: {},
+    grid4ImageMap: {},
+  };
+  render(
+    project,
+    normalizeSegments(nextSegments),
+    ctx.promptMap || {},
+    ctx.bindingMap || {},
+    ctx.videoMap || {},
+    ctx.multiShotMap || {},
+    ctx.videoPromptMap || {},
+    ctx.grid4ImageMap || {}
+  );
+  setStatus(`已删除剧情段 ${sid}`);
+}
+
+window.deleteManualScriptSegment = deleteManualScriptSegment;
 
 function persistGeneratedImagePromptsByRows(project = '', rows = []){
   const p = String(project || '').trim();
@@ -2740,7 +3136,7 @@ async function expandImagePromptEditor(btn){
         <h3 class="text-base font-medium text-white flex items-center gap-2" style="font-size:16px;font-weight:600;color:#fff;">${promptKindLabel} - 分镜 #${escapeHtml(sid)}</h3>
         <div class="flex items-center gap-2" style="display:flex;gap:8px;">
           <button type="button" data-act="regen" class="px-3 py-1.5 text-sm font-medium rounded-lg transition-colors" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(96,165,250,.35);background:rgba(59,130,246,.18);color:#93c5fd;">重新生成提示词</button>
-          <button type="button" data-act="cancel" class="px-3 py-1.5 text-sm text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.75);">取消</button>
+          <button type="button" data-act="cancel" class="px-3 py-1.5 text-sm text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.75);">关闭</button>
           <button type="button" data-act="save" class="px-4 py-1.5 text-sm font-medium bg-[#00FFCC]/30 text-[#00FFCC] hover:bg-[#00FFCC]/40 rounded-lg transition-colors" style="padding:6px 14px;border-radius:8px;border:1px solid rgba(0,255,204,.35);background:rgba(0,255,204,.2);color:#00FFCC;">保存</button>
         </div>
       </div>
@@ -2754,8 +3150,22 @@ async function expandImagePromptEditor(btn){
     </div>
   `;
 
-  const close = () => mask.remove();
-  mask.addEventListener('click', (e) => { if(e.target === mask) close(); });
+  const syncEditorToSource = () => {
+    area.value = String(editor?.value || '');
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    area.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const close = () => {
+    syncEditorToSource();
+    mask.remove();
+  };
+  mask.addEventListener('click', (e) => {
+    if(e.target === mask){
+      e.preventDefault();
+      e.stopPropagation();
+      editor?.focus?.();
+    }
+  });
 
   document.body.appendChild(mask);
 
@@ -2766,6 +3176,7 @@ async function expandImagePromptEditor(btn){
   const cancelBtn = mask.querySelector('button[data-act="cancel"]');
   const editor = mask.querySelector('textarea[data-role="editor"]');
   if(editor) editor.value = String(area.value || '');
+  editor?.addEventListener('input', syncEditorToSource);
 
   const refreshOptState = () => {
     if(!optBtn || !reqInput) return;
@@ -2779,9 +3190,7 @@ async function expandImagePromptEditor(btn){
   cancelBtn?.addEventListener('click', close);
 
   saveBtn?.addEventListener('click', () => {
-    area.value = String(editor?.value || '').trim();
-    area.dispatchEvent(new Event('input', { bubbles: true }));
-    area.dispatchEvent(new Event('change', { bubbles: true }));
+    syncEditorToSource();
     area.dispatchEvent(new Event('blur', { bubbles: true }));
     close();
   });
@@ -3017,9 +3426,30 @@ async function restoreOriginalStoryOutlineFromProject(force = false){
   }
 }
 
+async function loadStoryOutlineDraftFromDisk(project){
+  const p = String(project || '').trim();
+  if(!p) return;
+  try{
+    const apiUrl = typeof storyOutlineApiUrl === 'function'
+      ? storyOutlineApiUrl(`?project=${encodeURIComponent(p)}&t=${Date.now()}`)
+      : new URL(`/api/story-outline?project=${encodeURIComponent(p)}&t=${Date.now()}`, window.location.href).toString();
+    const resp = await fetch(apiUrl);
+    if(!resp.ok) return;
+    const data = await resp.json();
+    const text = String(data?.text || '');
+    if(data?.ok && text){
+      saveStoryOutlineDraft(p, text);
+    }
+  }catch{}
+}
+
 async function loadProject(project){
   if(!project) return setStatus('请先选择/输入项目目录', false);
   currentProjectName = String(project || '').trim();
+  if(q('projectInput')) q('projectInput').value = project;
+  if(q('projectSelect')) q('projectSelect').value = project;
+  await loadStoryOutlineDraftFromDisk(project);
+  await loadProjectManualSegmentsFromDisk(project);
   await loadGlobalCharacterLibrary(false);
   const p = projectPaths(project);
 
@@ -3108,7 +3538,8 @@ async function loadProject(project){
       videoMap[sid].latest = rec;
     }
 
-    if(!allSegments.length) return setStatus(`项目 ${project} 的 segments 为空`, false);
+    const savedManualSegments = getProjectManualSegments(project);
+    if(!allSegments.length && !savedManualSegments.length) return setStatus(`项目 ${project} 的 segments 为空`, false);
     for(const sid of Object.keys(detailShotMap)){
       const seen = new Set();
       detailShotMap[sid] = detailShotMap[sid].filter(it => {
@@ -3184,11 +3615,9 @@ async function loadProject(project){
     const tableSegments = manualSegments.length ? normalizeSegments(manualSegments) : allSegments;
 
     renderCharacters(finalCharacters, project);
-    renderStoryOutline(project, allSegments);
+    renderStoryOutline(project, tableSegments);
     render(project, tableSegments, promptMap, bindingMap, videoMap, multiShotMap, videoPromptMap, grid4ImageMap);
 
-    q('projectInput').value = project;
-    q('projectSelect').value = project;
     syncProjectSwitcherState(readProjectIndexLocal(), project);
 
     const u = new URL(window.location.href);
@@ -5304,12 +5733,50 @@ document.addEventListener('keydown', (e)=>{
   const projectSelectEl = q('projectSelect');
   const projectInputEl = q('projectInput');
   const projectCreateInputEl = q('projectCreateInput');
+  const segmentCastRowsEl = q('segmentCastRows');
+  if(segmentCastRowsEl){
+    segmentCastRowsEl.addEventListener('click', (e) => {
+      const btn = e.target?.closest?.('button[data-role="rename-cast"], button[data-role="delete-cast"], button[data-role="save-rename-cast"], button[data-role="cancel-rename-cast"]');
+      if(!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if(btn.getAttribute('data-role') === 'cancel-rename-cast'){
+        currentSegmentCastRename = null;
+        renderSegmentCastModalRows();
+        return;
+      }
+      const project = String(btn.getAttribute('data-project') || '');
+      const sid = String(btn.getAttribute('data-sid') || '');
+      const name = String(btn.getAttribute('data-name') || '');
+      console.info('[segment-cast] action clicked', { role: btn.getAttribute('data-role'), project, sid, name });
+      if(btn.getAttribute('data-role') === 'rename-cast') renameSegmentCastCandidate(project, sid, name);
+      else if(btn.getAttribute('data-role') === 'save-rename-cast'){
+        const input = btn.closest('td')?.querySelector?.('input[data-role="rename-cast-input"]');
+        applySegmentCastRename(project, sid, name, input?.value || '');
+      }
+      else deleteSegmentCastCandidate(project, sid, name);
+    });
+    segmentCastRowsEl.addEventListener('keydown', (e) => {
+      const input = e.target?.closest?.('input[data-role="rename-cast-input"]');
+      if(!input) return;
+      if(e.key === 'Enter'){
+        e.preventDefault();
+        const btn = input.closest('td')?.querySelector?.('button[data-role="save-rename-cast"]');
+        btn?.click?.();
+      }else if(e.key === 'Escape'){
+        e.preventDefault();
+        currentSegmentCastRename = null;
+        renderSegmentCastModalRows();
+      }
+    });
+  }
   if(projectSelectEl){
-    projectSelectEl.addEventListener('change', ()=>{
+    projectSelectEl.addEventListener('change', async ()=>{
       const pick = String(projectSelectEl.value || '').trim();
       if(!pick) return;
       if(projectInputEl) projectInputEl.value = pick;
       syncProjectSwitcherState(readProjectIndexLocal(), pick);
+      await loadCurrentProject();
     });
   }
   if(projectInputEl){

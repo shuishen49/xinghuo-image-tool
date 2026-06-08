@@ -206,6 +206,7 @@
     .project-home-title { font-size: 16px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
     .project-home-sub { font-size: 12px; color: #93c5fd; }
     .project-home-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .project-home-grid-single { grid-template-columns: minmax(0, 720px); justify-content: center; }
     .project-home-card {
       border: 1px solid rgba(255,255,255,.1);
       border-radius: 12px;
@@ -371,6 +372,26 @@
     th:nth-child(7), td:nth-child(7) { min-width: 380px; }
     th:nth-child(8), td:nth-child(8) { width: 90px; text-align: center; }
     th:nth-child(9), td:nth-child(9) { width: 240px; }
+    .script-header-tools { display:flex; flex-direction:row; gap:8px; align-items:center; white-space:nowrap; }
+    .row-index-cell { display:flex; flex-direction:column; align-items:center; justify-content:flex-start; gap:8px; min-height:52px; }
+    .row-index-num { font-weight:700; color:#e5e7eb; line-height:1; }
+    .row-action-btn {
+      width:28px; height:28px; border-radius:999px; border:1px solid rgba(34,211,238,.45);
+      background:rgba(34,211,238,.14); color:#67e8f9; cursor:pointer; display:inline-flex;
+      align-items:center; justify-content:center; font-size:20px; line-height:1; padding:0;
+    }
+    .row-action-btn.row-delete-btn { border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.12); color:#fca5a5; font-size:18px; }
+    .row-action-btn.row-delete-btn:hover { background:rgba(248,113,113,.22); border-color:rgba(248,113,113,.76); }
+    .row-add-btn {
+      width:28px; height:28px; border-radius:999px; border:1px solid rgba(34,211,238,.45);
+      background:rgba(34,211,238,.14); color:#67e8f9; cursor:pointer; display:inline-flex;
+      align-items:center; justify-content:center; font-size:20px; line-height:1; padding:0;
+    }
+    .row-add-btn:hover { background:rgba(34,211,238,.24); border-color:rgba(34,211,238,.75); }
+    .storyboard-empty-row td { padding:24px 16px; text-align:center; }
+    .storyboard-empty-row td:first-child { padding:16px 8px; vertical-align:top; }
+    .storyboard-empty-box { display:flex; flex-direction:column; align-items:center; gap:10px; color:var(--muted); }
+    .storyboard-empty-actions { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
     .scene-summary-card {
       min-height: 140px;
       padding: 12px;
@@ -1140,37 +1161,24 @@
           <button type="button" class="title-entry-btn" onclick="backToProjectHome()">项目入口</button>
         </div>
 
-        <section id="projectHomeScreen" class="project-home">
+        <section id="projectHomeScreen" class="project-home" style="display:none;">
           <div class="project-home-hero">
             <div class="project-home-title">项目入口</div>
             <div class="project-home-sub">先选择要继续的项目，再进入分镜工作区。</div>
           </div>
-          <div class="project-home-grid">
+          <div class="project-home-grid project-home-grid-single">
             <div class="project-home-card">
               <div class="project-home-card-title">加载已有项目</div>
-              <div class="project-home-card-sub">从本地索引挑选，或手动输入项目目录名。</div>
+              <div class="project-home-card-sub">从本地索引挑选项目，选择后直接进入分镜工作区。</div>
               <div class="project-home-row">
                 <select id="projectSelect"></select>
                 <button onclick="discoverProjects({ forceRefresh: true })">刷新</button>
               </div>
-              <div class="project-home-row">
-                <input id="projectInput" placeholder="输入项目名，例如 episode-1-20260320-113900" />
-                <button class="btn-primary" onclick="loadCurrentProject()">进入项目</button>
-              </div>
+              <input id="projectInput" type="hidden" />
+              <input id="projectCreateInput" type="hidden" />
               <div class="project-home-quick">
                 <div class="meta" style="margin:0;white-space:nowrap;">最近项目：</div>
                 <div id="projectQuickList" class="project-quick-list"></div>
-              </div>
-            </div>
-            <div class="project-home-card">
-              <div class="project-home-card-title">新建项目</div>
-              <div class="project-home-card-sub">创建本地项目壳，并立即进入编辑工作区。</div>
-              <div class="project-home-row">
-                <input id="projectCreateInput" placeholder="新项目名，例如 youguanche-ep02" />
-                <button class="btn-primary" onclick="createProject()">新建并进入</button>
-              </div>
-              <div class="project-home-current">
-                <span id="projectCurrentBadge" class="project-switcher-current">当前项目：未选择</span>
               </div>
             </div>
           </div>
@@ -1179,7 +1187,7 @@
           </div>
         </section>
 
-        <section id="workspaceShell" class="workspace-shell">
+        <section id="workspaceShell" class="workspace-shell active">
         <div class="page-tabs" role="tablist" aria-label="工作流页面切换">
           <button id="tabScriptPage" class="page-tab-btn active" role="tab" aria-selected="true" onclick="switchMainPage('script')">剧本</button>
           <button id="tabDubbingPage" class="page-tab-btn" role="tab" aria-selected="false" onclick="switchMainPage('dubbing')">配音</button>
@@ -1191,7 +1199,7 @@
             <button class="btn-primary" onclick="toggleCharacterPanel(true)">角色设定（放大）</button>
           </div>
 
-          <div id="outlinePanelWrap" class="panel outline-panel panel-hidden">
+          <div id="outlinePanelWrap" class="panel outline-panel">
           <button class="panel-close-x" onclick="toggleOutlinePanel(false)" aria-label="关闭">×</button>
           <div class="outline-toolbar">
             <div>
@@ -1201,6 +1209,7 @@
               <div id="segmentTaskStatus" class="segment-task-status">任务状态：空闲</div>
             </div>
             <div class="outline-actions">
+              <button id="saveOutlineBtn" class="btn-primary" onclick="saveCurrentStoryOutline()">保存大纲</button>
               <button id="segmentTaskBtn" class="btn-primary" onclick="oneClickSegmentStory()">一键剧情分段</button>
               <button class="btn-ghost" onclick="switchToOutlineMode()">修改大纲</button>
               <button class="btn-ghost" onclick="analyzeCharactersFromOutline()">分析角色</button>
@@ -1235,7 +1244,11 @@
               <thead>
                 <tr>
                   <th>序号</th>
-                  <th>剧情分段（Script）</th>
+                  <th>
+                    <div class="script-header-tools">
+                      <span>剧情分段（Script）</span>
+                    </div>
+                  </th>
                   <th>
                     <div style="display:flex;flex-direction:row;gap:8px;align-items:center;white-space:nowrap;">
                       <button class="btn-primary" onclick="addAllCharactersToAllSegments()">一键全部添加</button>

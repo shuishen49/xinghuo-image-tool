@@ -165,6 +165,30 @@ struct ProjectsQuery { #[serde(default)] refresh: Option<String> }
 #[serde(rename_all = "camelCase")]
 struct RebuildReq { #[serde(default)] projects: Vec<String> }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StoryOutlineReq {
+    project: String,
+    #[serde(default)] text: String,
+}
+
+#[derive(Deserialize, Default)]
+struct StoryOutlineQuery {
+    #[serde(default)] project: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ManualSegmentsReq {
+    project: String,
+    #[serde(default)] segments: serde_json::Value,
+}
+
+#[derive(Deserialize, Default)]
+struct ManualSegmentsQuery {
+    #[serde(default)] project: String,
+}
+
 // ============= server startup =============
 
 pub fn start(config: SharedConfig) -> u16 {
@@ -196,6 +220,8 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/*path", get(serve_path).head(serve_path_head))
         .route("/api/projects", get(handle_projects))
         .route("/api/projects/rebuild", post(handle_projects_rebuild))
+        .route("/api/story-outline", get(handle_story_outline_get).post(handle_story_outline_save))
+        .route("/api/manual-segments", get(handle_manual_segments_get).post(handle_manual_segments_save))
         .route("/api/scene-image/save-local", post(handle_scene_save))
         .route("/api/scene-image/variant", post(handle_scene_variant))
         .route("/api/lobster/task", post(handle_lobster_task))
@@ -255,17 +281,15 @@ fn serve_embedded(path: &str) -> Response {
     }
 }
 
-fn gateway_image_ref(src: &str, self_port: u16) -> String {
+fn gateway_image_ref(src: &str) -> String {
     let s = src.trim();
-    if s.starts_with("http://")
-        || s.starts_with("https://")
-        || s.starts_with("data:")
-        || s.is_empty()
-    {
-        return s.to_string();
-    }
-    let clean = s.trim_start_matches("./").trim_start_matches('/');
-    format!("http://127.0.0.1:{self_port}/{clean}")
+    s.to_string()
+}
+
+pub(crate) fn embedded_asset_bytes(path: &str) -> Option<(Vec<u8>, String)> {
+    let clean = path.trim().trim_start_matches("./").trim_start_matches('/');
+    let c = WebAssets::get(clean)?;
+    Some((c.data.into_owned(), mime_for(clean).to_string()))
 }
 
 // ============= health =============
@@ -342,6 +366,88 @@ fn is_proj_name(n: &str) -> bool {
         && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
+async fn handle_story_outline_get(
+    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    Query(q): Query<StoryOutlineQuery>,
+) -> Response {
+    if !is_proj_name(&q.project) {
+        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"message":"invalid project"}}));
+    }
+    let ws = { cfg.read().unwrap().workspace_dir.clone() };
+    let path = story_outline_path(&ws, &q.project);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => ok_json(json!({"ok":true,"project":q.project,"text":text})),
+        Err(_) => ok_json(json!({"ok":false,"project":q.project,"text":""})),
+    }
+}
+
+async fn handle_story_outline_save(
+    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    Json(body): Json<StoryOutlineReq>,
+) -> Response {
+    if !is_proj_name(&body.project) {
+        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"message":"invalid project"}}));
+    }
+    let ws = { cfg.read().unwrap().workspace_dir.clone() };
+    let path = story_outline_path(&ws, &body.project);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":format!("mkdir: {e}")}}));
+        }
+    }
+    match tokio::fs::write(&path, body.text).await {
+        Ok(_) => ok_json(json!({"ok":true,"project":body.project})),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":format!("write: {e}")}})),
+    }
+}
+
+fn story_outline_path(ws: &Path, project: &str) -> PathBuf {
+    ws.join(project).join("planning").join("story-outline-draft.txt")
+}
+
+async fn handle_manual_segments_get(
+    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    Query(q): Query<ManualSegmentsQuery>,
+) -> Response {
+    if !is_proj_name(&q.project) {
+        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"message":"invalid project"}}));
+    }
+    let ws = { cfg.read().unwrap().workspace_dir.clone() };
+    let path = manual_segments_path(&ws, &q.project);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => {
+            let segments: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| json!([]));
+            ok_json(json!({"ok":true,"project":q.project,"segments":segments}))
+        }
+        Err(_) => ok_json(json!({"ok":false,"project":q.project,"segments":[]})),
+    }
+}
+
+async fn handle_manual_segments_save(
+    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    Json(body): Json<ManualSegmentsReq>,
+) -> Response {
+    if !is_proj_name(&body.project) {
+        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"message":"invalid project"}}));
+    }
+    let ws = { cfg.read().unwrap().workspace_dir.clone() };
+    let path = manual_segments_path(&ws, &body.project);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":format!("mkdir: {e}")}}));
+        }
+    }
+    let text = serde_json::to_string_pretty(&body.segments).unwrap_or_else(|_| "[]".to_string());
+    match tokio::fs::write(&path, text).await {
+        Ok(_) => ok_json(json!({"ok":true,"project":body.project})),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":format!("write: {e}")}})),
+    }
+}
+
+fn manual_segments_path(ws: &Path, project: &str) -> PathBuf {
+    ws.join(project).join("planning").join("manual-segments-draft.json")
+}
+
 // ============= scene image save-local =============
 
 async fn handle_scene_save(
@@ -369,10 +475,10 @@ async fn handle_scene_variant(
         return err_json(StatusCode::BAD_REQUEST,
             json!({"error":{"type":"missing_field","message":"缺少 imageUrl / prompt"}}));
     }
-    let (img_base, img_key, img_model, img_upload_url, img_timeout, self_port) = {
+    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
         let g = cfg.read().unwrap();
         (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout, g.self_port)
+         g.img_upload_url.clone(), g.img_timeout)
     };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE,
@@ -381,7 +487,7 @@ async fn handle_scene_variant(
     let model = if img_model.is_empty() { "gpt-5-4-thinking" } else { img_model.as_str() };
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 120 } else { img_timeout };
-    let refs = vec![gateway_image_ref(&img, self_port)];
+    let refs = vec![gateway_image_ref(&img)];
     match crate::run_generation(&img_base, &img_key, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
@@ -409,18 +515,18 @@ async fn handle_lobster_task(
     let prompt = (!p.image_prompt.is_empty()).then(|| p.image_prompt.clone())
         .unwrap_or_default();
 
-    let (img_base, img_key, img_model, img_upload_url, img_timeout, self_port) = {
+    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
         let g = cfg.read().unwrap();
         (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout, g.self_port)
+         g.img_upload_url.clone(), g.img_timeout)
     };
 
     let mut refs: Vec<String> = Vec::new();
     for u in [&p.image_url, &p.source_image_url] {
-        if !u.is_empty() { refs.push(gateway_image_ref(u, self_port)); }
+        if !u.is_empty() { refs.push(gateway_image_ref(u)); }
     }
     for cr in &p.character_refs {
-        if !cr.image_url.is_empty() { refs.push(gateway_image_ref(&cr.image_url, self_port)); }
+        if !cr.image_url.is_empty() { refs.push(gateway_image_ref(&cr.image_url)); }
     }
     refs.dedup();
 

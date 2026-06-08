@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -221,6 +221,20 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 /// Resolve an image source returned by the API or supplied as a reference.
 /// May be an http(s) URL, a `data:` URI, or (defensively) raw base64.
 async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
+    let src = src.trim();
+    if let Some((bytes, mime)) = gateway::embedded_asset_bytes(src) {
+        return Ok((bytes, mime));
+    }
+    if let Some(path) = src.strip_prefix("file://") {
+        let path = PathBuf::from(path.trim_start_matches('/'));
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取本地图片失败: {e}"))?;
+        return Ok((bytes, mime_for_path(&path.to_string_lossy()).to_string()));
+    }
+    let path = Path::new(src);
+    if path.exists() && path.is_file() {
+        let bytes = std::fs::read(path).map_err(|e| format!("读取本地图片失败: {e}"))?;
+        return Ok((bytes, mime_for_path(src).to_string()));
+    }
     if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
         src_to_bytes(c, src).await
     } else if looks_like_base64(src) {
@@ -330,11 +344,21 @@ async fn ref_to_url(
     src: &str,
 ) -> Result<String, String> {
     let s = src.trim();
-    if s.starts_with("http://") || s.starts_with("https://") {
+    if (s.starts_with("http://") || s.starts_with("https://")) && !is_loopback_url(s) {
         return Ok(s.to_string());
     }
     let (bytes, mime) = resolve_src(c, s).await?;
     upload_image(c, upload_url, api_key, bytes, &mime).await
+}
+
+fn is_loopback_url(s: &str) -> bool {
+    let low = s.to_ascii_lowercase();
+    low.starts_with("http://127.")
+        || low.starts_with("http://localhost")
+        || low.starts_with("http://[::1]")
+        || low.starts_with("https://127.")
+        || low.starts_with("https://localhost")
+        || low.starts_with("https://[::1]")
 }
 
 /// Save bytes under <Pictures>/xinghuo-image-tool/ and return the absolute path.

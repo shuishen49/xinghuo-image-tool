@@ -34,7 +34,17 @@ let editMode = 'outline'; // outline | character
 
 function q(id){ return document.getElementById(id); }
 function setStatus(text, ok=true){ q('status').textContent=text; q('status').className = ok ? 'meta ok' : 'meta err'; }
-function getProject(){ return (q('projectInput').value || q('projectSelect').value || '').trim(); }
+function getProject(){
+  const fromInput = q('projectInput')?.value;
+  const fromSelect = q('projectSelect')?.value;
+  const fromQuery = getQueryParam('project');
+  return String(fromInput || fromSelect || fromQuery || '').trim();
+}
+
+function fillChatConfigUi(){
+  // The chat config form was removed from the storyboard chat panel.
+  // Keep this no-op so older init code can run without interrupting project load.
+}
 
 function escapeHtml(str=''){
   return String(str)
@@ -685,6 +695,12 @@ async function requestChatCompletion(userText, options = {}){
     temperature: Number.isFinite(options?.temperature) ? options.temperature : 0.7,
     stream: false,
   };
+  if(options?.responseFormat){
+    body.response_format = options.responseFormat;
+  }
+  if(Number.isFinite(options?.maxTokens)){
+    body.max_tokens = options.maxTokens;
+  }
   const headers = { 'Content-Type': 'application/json' };
   if(cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
   const signal = options?.signal;

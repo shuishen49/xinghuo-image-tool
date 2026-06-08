@@ -258,7 +258,6 @@ let latestOutlineProject = '';
 let latestOutlineSegments = [];
 let segmentTaskRunning = false;
 let outlineAutosaveBound = false;
-let outlineAutosaveTimer = null;
 
 function setSegmentTaskStatus(text = '', state = 'idle'){
   const el = q('segmentTaskStatus');
@@ -311,19 +310,103 @@ function normalizeStoryOutlineDraftKey(project=''){
 }
 
 function getStoryOutlineDraft(project=''){
-  const key = normalizeStoryOutlineDraftKey(project);
   const map = readStoryOutlineDraftMap();
-  if(Object.prototype.hasOwnProperty.call(map, key)){
-    return { exists: true, text: String(map[key] ?? '') };
+  for(const key of storyOutlineDraftKeys(project)){
+    if(Object.prototype.hasOwnProperty.call(map, key)){
+      return { exists: true, text: String(map[key] ?? '') };
+    }
   }
   return { exists: false, text: '' };
 }
 
 function saveStoryOutlineDraft(project='', text=''){
-  const key = normalizeStoryOutlineDraftKey(project);
   const map = readStoryOutlineDraftMap();
-  map[key] = String(text ?? '');
+  storyOutlineDraftKeys(project).forEach((key) => {
+    map[key] = String(text ?? '');
+  });
   try { localStorage.setItem(STORY_OUTLINE_DRAFT_KEY, JSON.stringify(map)); } catch {}
+}
+
+function storyOutlineDraftKeys(project=''){
+  const keys = [];
+  const add = (v) => {
+    const k = normalizeStoryOutlineDraftKey(v);
+    if(k && !keys.includes(k)) keys.push(k);
+  };
+  add(project);
+  add(latestOutlineProject);
+  add(typeof currentProjectName !== 'undefined' ? currentProjectName : '');
+  try { add(new URL(window.location.href).searchParams.get('project') || ''); } catch {}
+  try { add(getProject()); } catch {}
+  return keys.length ? keys : ['__default__'];
+}
+
+function storyOutlineApiUrl(search = ''){
+  const u = new URL('/api/story-outline', window.location.href);
+  if(search) u.search = search;
+  return u.toString();
+}
+
+function getCurrentStoryOutlineProject(){
+  const values = [
+    latestOutlineProject,
+    typeof currentProjectName !== 'undefined' ? currentProjectName : '',
+    q('projectInput')?.value,
+    q('projectSelect')?.value,
+  ];
+  try { values.push(new URL(window.location.href).searchParams.get('project') || ''); } catch {}
+  try { values.push(getProject()); } catch {}
+  return String(values.find(v => String(v || '').trim()) || '').trim();
+}
+
+async function saveCurrentStoryOutline(showToast = true){
+  const box = q('storyOutline');
+  const btn = q('saveOutlineBtn');
+  const oldBtnText = btn ? String(btn.textContent || '保存大纲') : '保存大纲';
+  const setBtnState = (text, disabled = false) => {
+    if(!btn) return;
+    btn.textContent = text;
+    btn.disabled = !!disabled;
+  };
+  if(!box){
+    console.error('[story-outline] save failed: storyOutline textarea not found');
+    if(showToast) setStatus('未找到故事大纲输入框，保存失败。', false);
+    return false;
+  }
+  const project = getCurrentStoryOutlineProject();
+  if(!String(project || '').trim()){
+    console.error('[story-outline] save failed: empty project');
+    if(showToast) setStatus('请先进入项目，再保存故事大纲。', false);
+    return false;
+  }
+  const text = String(box.value || '');
+  const startedAt = Date.now();
+  console.info('[story-outline] saving', { project, chars: text.length });
+  setBtnState('保存中...', true);
+  if(showToast) setStatus(`故事大纲保存中：${project}`);
+  saveStoryOutlineDraft(project, box.value || '');
+  try {
+    const resp = await fetch(storyOutlineApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project, text }),
+    });
+    if(!resp.ok){
+      const data = await resp.json().catch(() => null);
+      throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+    }
+    console.info('[story-outline] saved', { project, chars: text.length, ms: Date.now() - startedAt });
+  } catch (err) {
+    console.error('[story-outline] save failed', { project, error: err });
+    setBtnState('保存失败', false);
+    if(showToast) setStatus(`故事大纲本地已保存，写入项目文件失败：${err.message}`, false);
+    setTimeout(() => setBtnState(oldBtnText, false), 1600);
+    return false;
+  }
+  setBtnState('已保存', false);
+  if(showToast) setStatus(`故事大纲已保存：${project}`);
+  setTimeout(() => setBtnState(oldBtnText, false), 1200);
+  return true;
 }
 
 function buildStoryOutline(project, segments = []){
@@ -406,24 +489,19 @@ function setupOutlineAutosave(){
   if(!box) return;
   outlineAutosaveBound = true;
 
-  box.addEventListener('input', () => {
-    if(outlineAutosaveTimer) clearTimeout(outlineAutosaveTimer);
-    outlineAutosaveTimer = setTimeout(() => {
-      const project = latestOutlineProject || getProject();
-      saveStoryOutlineDraft(project, box.value);
-    }, 400);
-  });
+  const saveOutlineNow = () => { saveCurrentStoryOutline(false); };
+
+  box.addEventListener('input', saveOutlineNow);
+  box.addEventListener('change', saveOutlineNow);
+  box.addEventListener('blur', saveOutlineNow);
+  window.addEventListener('beforeunload', saveOutlineNow);
 
   // 放大编辑弹窗：编辑时同步写回主文本框并保存草稿，保持两处一致。
   const zoomBox = q('outlineZoomText');
   if(zoomBox){
     zoomBox.addEventListener('input', () => {
       box.value = zoomBox.value;
-      if(outlineAutosaveTimer) clearTimeout(outlineAutosaveTimer);
-      outlineAutosaveTimer = setTimeout(() => {
-        const project = latestOutlineProject || getProject();
-        saveStoryOutlineDraft(project, box.value);
-      }, 400);
+      saveOutlineNow();
     });
   }
 }
@@ -560,6 +638,36 @@ function parseSegmentsFromReadableText(raw){
   return segments.length ? { segments } : null;
 }
 
+async function repairSegmentsJsonWithAi(rawText = '', outlineText = '', project = ''){
+  if(typeof requestChatCompletion !== 'function') return null;
+  const repairPrompt = [
+    'Convert the following AI reply into strict JSON only.',
+    'Return exactly one JSON object with this schema:',
+    '{"segments":[{"id":"S01","durationSec":5,"type":"短剧情","scene":"画面内容","action":"角色动作","dialogue":"台词，可为空"}]}',
+    'Rules: no markdown, no explanation, first character must be {, last character must be }.',
+    'If the reply has no useful segments, create segments from the source outline.',
+    '',
+    `Project: ${project || 'untitled'}`,
+    'Source outline:',
+    outlineText,
+    '',
+    'AI reply to repair:',
+    rawText,
+  ].join('\n');
+  try{
+    const fixed = await requestChatCompletion(repairPrompt, {
+      temperature: 0,
+      responseFormat: { type: 'json_object' },
+    });
+    const fixedText = String(fixed || '').trim();
+    console.log('[segment] AI repair reply length=', fixedText.length, '\n', fixedText);
+    return extractSegmentsJsonFromText(fixedText);
+  }catch(err){
+    console.warn('[segment] repair failed', err);
+    return null;
+  }
+}
+
 async function oneClickSegmentStory(){
   if(segmentTaskRunning){
     setStatus('已有分段任务在执行，请等待完成后再点击', false);
@@ -605,7 +713,10 @@ async function oneClickSegmentStory(){
     setSegmentTaskStatus('正在进行 AI 一键剧情分段...', 'running');
     if(typeof setChatStatus === 'function') setChatStatus('AI 正在按 10s/5s 规则分段...');
 
-    const reply = await requestChatCompletion(prompt);
+    const reply = await requestChatCompletion(prompt, {
+      temperature: 0,
+      responseFormat: { type: 'json_object' },
+    });
     const text = String(reply || '').trim();
     console.log('[segment] AI raw reply length=', text.length, '\n', text);
 
@@ -615,7 +726,11 @@ async function oneClickSegmentStory(){
       return;
     }
 
-    const parsed = extractSegmentsJsonFromText(text);
+    let parsed = extractSegmentsJsonFromText(text);
+    if(!parsed || !parsed.segments){
+      setSegmentTaskStatus('AI 返回非标准 JSON，正在自动修复...', 'running');
+      parsed = await repairSegmentsJsonWithAi(text, outlineText, project);
+    }
     if(!parsed || !parsed.segments){
       // AI returned text but no parseable JSON — show it in chat so user can see + retry
       console.warn('[segment] no JSON found. raw reply:\n', text);
@@ -712,4 +827,3 @@ async function copyOutlineZoomText(){
     setStatus(`复制失败：${err.message}`, false);
   }
 }
-
