@@ -101,7 +101,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = '0.1.0'
+          $ver = '0.1.1'
           try {
             $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           } catch {

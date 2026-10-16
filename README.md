@@ -21,6 +21,7 @@
 
 ## 功能
 
+- **首页 + 独立登录页**：没凭证时先进「首页」大厅，点「登录」进登录页用网站账号登录，或直接点「我想用 API Key 使用」跳到设置页。
 - **两种登录方式**：`API Key`（Bearer）或 `用户名 + 密码`（换取短期 Token），可随时切换。
 - **文生图**：输入提示词生成图片。
 - **图生图**：添加参考图（文件 / 粘贴剪贴板 / 图片链接），按提示词改图、翻译图中文字等。
@@ -36,11 +37,20 @@
 
 ## 使用
 
-打开应用后，先到 **设置** 填写：
+打开应用后先进 **首页**（没凭证时自动落在这里），两个入口：
+
+| 入口 | 作用 |
+|---|---|
+| **登录** | 进独立「登录」页，填网站账号密码 → 登录后回首页，首页显示账号 / 有效期 |
+| **我想用 API Key 使用** | 自动切到 API Key 模式 + 填好默认接口地址，直接跳到设置页等你粘 Key |
+
+在 **设置** 页里「登录方式」点 **② 用户名 + 密码** 会直接跳到登录页（手上已有可用 Token 时只切模式，不用重登）。
+
+设置页要填的项：
 
 | 项 | 说明 |
 |---|---|
-| 接口地址 (Base URL) | OpenAI 兼容服务地址，例如 `https://uuerqapsftez.sealosgzg.site` |
+| 接口地址 (Base URL) | OpenAI 兼容服务地址，例如 `https://uuerqapsftez.sealosgzg.site`（**留空自动用这个**） |
 | 登录方式 | ① `API Key`：形如 `sk_xxx`，用 `Authorization: Bearer` 发送；② `用户名 + 密码`：登录换取短期 Token，用 `token` 头发送 |
 | 用户名 / 密码 | 选②时填写，就是网站登录账号。**只用于换 Token，密码不保存、不外发** |
 | 等待超时（秒） | 单个请求最长等待，默认 600（10 分钟），图片生成较慢，建议别调太小 |
@@ -64,6 +74,10 @@
 两者都不要混发：`token` 头优先级更高，客户端每次只发一种。Token 会过期，过期后重新点一次「登录」即可；生图请求发出后断线**不会**自动重发，避免重复扣费。
 
 用「用户名 + 密码」时，密码只发给你自己填的「接口地址」，不会写进任何本地文件或日志，也不会发给第三方图床（第三方图床是匿名上传，本来就不带凭证）。
+
+> **手机号验证码注册的账号默认没有密码**（服务端 `password` 为 NULL），用账密登录必然失败且只会报「密码错误」。
+> 登录页 / 设置页检测到用户名是手机号（或报错提到密码）时会提示去
+> <https://linggan10s.shop/profile> → 「账户设置」→「设置密码」，设完再回来登录。
 
 填好后到「文生图 / 图生图」输入提示词，选「出图张数」，点 **生成**，到「任务」页查看结果。
 
@@ -116,16 +130,15 @@ npx tauri build
   - `POST /api/lobster/task` — 生成一张分镜图（复用图片接口 `run_generation`），存到项目目录。
   - `POST /api/scene-image/save-local` — 把远程图片下载保存到本地项目目录。
   - `GET  /api/projects` — 列出本地项目。
-- **凭据隔离**：图片 / 配音的 Key 通过 `configure_gateway` 命令从设置推到 Rust 端共享状态，工作台 iframe 页面本身不持有任何 Key。
+- **凭据隔离**：图片的 Key / Token 通过 `configure_gateway` 命令从设置推到 Rust 端共享状态，工作台 iframe 页面本身不持有任何 Key。
 
-> **已移除的两个上游**：聊天（`/v1/chat/completions` → sub2api）和视频生成
-> （`/api/video/generate` → pic2api）的设置与转发都已删除。
-> `web-assets/` 里的剧本助手 / 视频页面仍会调用这两个路径，但由于工作台在正式版
-> 默认隐藏（`SHOW_DRAMA = false`），这些页面不可达。若要恢复工作台并重新启用
-> 这些功能，需要把对应的上游配置一起加回来。
+> **已移除的三个上游**：聊天（`/v1/chat/completions` → sub2api）、视频生成
+> （`/api/video/generate` → pic2api）和配音（`/api/dubbing/*` → DashScope）
+> 的设置项与转发代码都已删除。
+> `web-assets/` 里的剧本助手 / 视频 / 配音页面仍会调用这些路径，但由于工作台在
+> 正式版默认隐藏（`SHOW_DRAMA = false`），这些页面不可达。若要恢复工作台并重新
+> 启用这些功能，需要把对应的上游配置一起加回来。
 - 工作台的项目数据 / 生成图保存在 `图片(Pictures)/linggan10s-image-tool/projects/`。
-
-> 配音（`/api/dubbing/*`）保留可用；视频生成已移除，见上方说明。
 
 ---
 
@@ -141,11 +154,11 @@ npx tauri build
 
 ```
 src/                 前端（TypeScript）
-  main.ts            UI、任务队列、设置、漫剧工作台 iframe、图片放大
+  main.ts            UI：首页 / 登录页 / 文生图 / 图生图 / 任务 / 设置 / 漫剧工作台 iframe
 src-tauri/           Rust 后端
   src/lib.rs         run_generation（核心生成）+ generate_images / configure_gateway /
-                     gateway_url / read_saved_image 命令；启动时拉起内嵌网关
-  src/gateway.rs     内嵌 axum 网关：服务漫剧工作台静态页 + /api/*
+                     gateway_url / platform_login / read_saved_image 命令；启动时拉起内嵌网关
+  src/gateway.rs     内嵌 axum 网关：服务漫剧工作台静态页 + 图片生成 /api/*
   web-assets/        打进二进制的工作台页面（main.html、分镜预览、JS、角色库）
   tauri.conf.json    窗口 / 打包配置
 package.bat          一键打包脚本（安装版 + 绿色版）

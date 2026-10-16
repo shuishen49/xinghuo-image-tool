@@ -1,10 +1,10 @@
 // Embedded HTTP server: 1:1 reimplementation of grok-storyboard-preview's
 // preview-server + bridge-server.  All 16 endpoints implemented in pure Rust.
 // No python subprocess or external Node bridge needed.
-// Image gen reuses run_generation. Video generate (pic2api) and the chat
-// upstream (sub2api) were removed along with their settings — the workspace
-// pages that call them are unreachable while SHOW_DRAMA is false.
-// Dubbing → dashscope HTTP (with local-mock WAV fallback).
+// Image gen reuses run_generation.
+// Video generate (pic2api), the chat upstream (sub2api) and dubbing (dashscope)
+// were removed along with their settings — the workspace pages that call them
+// are unreachable while SHOW_DRAMA is false.
 // Frame capture → system ffmpeg.
 
 use axum::{
@@ -20,11 +20,9 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::SharedConfig;
@@ -38,16 +36,6 @@ const PROJECT_INDEX_FILE: &str = "project-index.json";
 #[folder = "web-assets/"]
 struct WebAssets;
 
-// ---------- in-memory dubbing voice state ----------
-
-#[derive(Clone, Default)]
-struct VoiceEntry {
-    voice_id: String,
-    preview_text: String,
-    preview_audio_url: String,
-}
-
-type DubbingState = Arc<Mutex<HashMap<String, VoiceEntry>>>;
 
 // ---------- request body structs ----------
 
@@ -194,7 +182,6 @@ pub fn start(config: SharedConfig) -> u16 {
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
-    let dubbing: DubbingState = Default::default();
     let workspace = { config.read().unwrap().workspace_dir.clone() };
     let _ = std::fs::create_dir_all(&workspace);
 
@@ -202,7 +189,7 @@ pub fn start(config: SharedConfig) -> u16 {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all().build().expect("gateway tokio runtime");
         rt.block_on(async {
-            let app = build_router(config, dubbing);
+            let app = build_router(config);
             let l = tokio::net::TcpListener::from_std(listener).unwrap();
             axum::serve(l, app.into_make_service_with_connect_info::<SocketAddr>()).await.ok();
         });
@@ -210,7 +197,7 @@ pub fn start(config: SharedConfig) -> u16 {
     port
 }
 
-fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
+fn build_router(cfg: SharedConfig) -> Router {
     Router::new()
         .route("/", get(serve_root))
         .route("/health", get(health_handler))
@@ -227,10 +214,8 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/api/video/save-local", post(handle_video_save))
         .route("/api/video/frame-capture", post(handle_frame_capture))
         .route("/api/video/head-image-upload", post(handle_head_upload))
-        .route("/api/dubbing/voice/design", post(handle_voice_design))
-        .route("/api/dubbing/voice/preview", post(handle_voice_preview))
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
-        .with_state((cfg, dub))
+        .with_state(cfg)
 }
 
 // ============= static file serving =============
@@ -238,12 +223,12 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
 async fn serve_root() -> Response { serve_embedded(DEFAULT_PAGE) }
 
 async fn serve_path_head(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     AxPath(path): AxPath<String>,
 ) -> Response { serve_path_impl(cfg, path, true).await }
 
 async fn serve_path(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     AxPath(path): AxPath<String>,
 ) -> Response { serve_path_impl(cfg, path, false).await }
 
@@ -289,7 +274,7 @@ pub(crate) fn embedded_asset_bytes(path: &str) -> Option<(Vec<u8>, String)> {
 
 // ============= health =============
 
-async fn health_handler(State((cfg, _)): State<(SharedConfig, DubbingState)>) -> Response {
+async fn health_handler(State(cfg): State<SharedConfig>) -> Response {
     let (ws, port) = {
         let g = cfg.read().unwrap();
         (g.workspace_dir.clone(), g.self_port)
@@ -300,7 +285,7 @@ async fn health_handler(State((cfg, _)): State<(SharedConfig, DubbingState)>) ->
 // ============= projects =============
 
 async fn handle_projects(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Query(q): Query<ProjectsQuery>,
 ) -> Response {
     let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -318,7 +303,7 @@ async fn handle_projects(
 }
 
 async fn handle_projects_rebuild(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<RebuildReq>,
 ) -> Response {
     let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -362,7 +347,7 @@ fn is_proj_name(n: &str) -> bool {
 }
 
 async fn handle_story_outline_get(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Query(q): Query<StoryOutlineQuery>,
 ) -> Response {
     if !is_proj_name(&q.project) {
@@ -377,7 +362,7 @@ async fn handle_story_outline_get(
 }
 
 async fn handle_story_outline_save(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<StoryOutlineReq>,
 ) -> Response {
     if !is_proj_name(&body.project) {
@@ -401,7 +386,7 @@ fn story_outline_path(ws: &Path, project: &str) -> PathBuf {
 }
 
 async fn handle_manual_segments_get(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Query(q): Query<ManualSegmentsQuery>,
 ) -> Response {
     if !is_proj_name(&q.project) {
@@ -419,7 +404,7 @@ async fn handle_manual_segments_get(
 }
 
 async fn handle_manual_segments_save(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<ManualSegmentsReq>,
 ) -> Response {
     if !is_proj_name(&body.project) {
@@ -446,7 +431,7 @@ fn manual_segments_path(ws: &Path, project: &str) -> PathBuf {
 // ============= scene image save-local =============
 
 async fn handle_scene_save(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<SceneSaveReq>,
 ) -> Response {
     let u = body.image_url.trim().to_string();
@@ -461,7 +446,7 @@ async fn handle_scene_save(
 // ============= scene image variant (img2img) =============
 
 async fn handle_scene_variant(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<SceneVariantReq>,
 ) -> Response {
     let img = body.image_url.trim().to_string();
@@ -503,7 +488,7 @@ async fn handle_scene_variant(
 // ============= lobster task (storyboard image gen) =============
 
 async fn handle_lobster_task(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<LobsterReq>,
 ) -> Response {
     let p = &body.payload;
@@ -553,7 +538,7 @@ async fn handle_lobster_task(
 // ============= character threeview =============
 
 async fn handle_threeview(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<ThreeViewReq>,
 ) -> Response {
     let name = if body.character_name.is_empty() { "未命名角色" } else { body.character_name.as_str() };
@@ -594,7 +579,7 @@ async fn handle_threeview(
 // ============= video save-local =============
 
 async fn handle_video_save(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<VideoSaveReq>,
 ) -> Response {
     let url = body.remote_video_url.trim().to_string();
@@ -611,7 +596,7 @@ async fn handle_video_save(
 // ============= video frame capture =============
 
 async fn handle_frame_capture(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<FrameReq>,
 ) -> Response {
     let video_url = body.video_url.trim().to_string();
@@ -657,7 +642,7 @@ async fn capture_frame(ws: &Path, ffmpeg: &str, vurl: &str, proj: &str, seg: &st
 // ============= video head-image upload =============
 
 async fn handle_head_upload(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<HeadUploadReq>,
 ) -> Response {
     if body.project.is_empty() || body.segment_id.is_empty() || body.image_data_url.is_empty() {
@@ -671,7 +656,7 @@ async fn handle_head_upload(
 }
 
 async fn handle_character_image_upload(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    State(cfg): State<SharedConfig>,
     Json(body): Json<CharacterImageUploadReq>,
 ) -> Response {
     let project = body.project.trim().to_string();
@@ -690,188 +675,6 @@ async fn handle_character_image_upload(
         Err(e) => err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"upload_failed","message":e}})),
     }
 }
-
-// ============= dubbing voice design =============
-
-async fn handle_voice_design(
-    State((cfg, dub)): State<(SharedConfig, DubbingState)>,
-    Json(body): Json<VoiceDesignReq>,
-) -> Response {
-    let proj = body.project.trim().to_string();
-    let role = body.role.trim().to_string();
-    let prompt = body.prompt.trim().to_string();
-    if proj.is_empty() || role.is_empty() || prompt.is_empty() {
-        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"missing_field","message":"缺少 project/role/prompt"}}));
-    }
-    let ptext = if body.preview_text.is_empty() { format!("{role}，您好，这是一段音色试听。") } else { body.preview_text.clone() };
-
-    let (ds_key, dm, tm) = {
-        let g = cfg.read().unwrap();
-        (g.dashscope_key.clone(), g.dashscope_design_model.clone(), g.dashscope_tts_model.clone())
-    };
-    let dm = if dm.is_empty() { "qwen-voice-design" } else { &dm };
-    let tm = if tm.is_empty() { "qwen3-tts-vd-realtime-2026-01-15" } else { &tm };
-
-    // Try real DashScope if key configured
-    if !ds_key.is_empty() {
-        if let Ok(r) = ds_voice_design(&ds_key, dm, tm, &role, &prompt, &ptext).await {
-            let k = voice_key(&proj, &role);
-            dub.lock().unwrap().insert(k, VoiceEntry {
-                voice_id: r.vid.clone(), preview_text: ptext.clone(), preview_audio_url: r.pau.clone(),
-            });
-            return ok_json(json!({"ok":true,"project":proj,"role":role,"voiceId":r.vid,"voice":r.vid,
-                "model":dm,"provider":"dashscope","ttsModel":tm,"previewText":ptext,"previewAudioUrl":r.pau}));
-        }
-    }
-
-    // Mock fallback
-    let seed = format!("{proj}|{role}|{prompt}");
-    let vid = format!("voice_{:x}", hash_u32(&seed));
-    let pau = wav_tone(&format!("{vid}:{prompt}"), 1.2);
-    let k = voice_key(&proj, &role);
-    dub.lock().unwrap().insert(k, VoiceEntry {
-        voice_id: vid.clone(), preview_text: ptext.clone(), preview_audio_url: pau.clone(),
-    });
-    ok_json(json!({"ok":true,"project":proj,"role":role,"voiceId":vid,"voice":vid,"model":"local-mock-voice-design",
-        "provider":"local-mock","previewText":ptext,"previewAudioUrl":pau,"note":"已返回本地预览音频（未接入真实音色供应商）"}))
-}
-
-struct DsVoiceOut { vid: String, pau: String }
-
-async fn ds_voice_design(key: &str, dm: &str, tm: &str, role: &str, prompt: &str, ptext: &str) -> Result<DsVoiceOut, String> {
-    let url = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization";
-    let body = json!({"model":dm,"input":{"action":"create","target_model":tm,"voice_prompt":prompt,"preview_text":ptext,"preferred_name":sanitize_preferred(role),"language":"zh"},"parameters":{"sample_rate":24000,"response_format":"wav"}});
-    let (st, resp) = http_post(url, key, &body, 120).await?;
-    if st < 200 || st >= 300 { return Err(format!("dashscope HTTP {st}")); }
-    let out = resp.get("output").cloned().unwrap_or_default();
-    let vid = out.get("voice").or_else(|| out.get("voice_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if vid.is_empty() { return Err("未返回 voice".to_string()); }
-    let pau = pick_ds_audio(&out);
-    Ok(DsVoiceOut { vid, pau })
-}
-
-// ============= voice preview =============
-
-async fn handle_voice_preview(
-    State((cfg, dub)): State<(SharedConfig, DubbingState)>,
-    Json(mut body): Json<VoicePreviewReq>,
-) -> Response {
-    let vid = body.voice_id.trim().to_string();
-    if body.project.is_empty() || body.role.is_empty() {
-        if let Some((p, r)) = find_voice_by_id(&dub, &vid) { body.project = p; body.role = r; }
-    }
-    if body.project.is_empty() { body.project = "__adhoc__".into(); }
-    if body.role.is_empty() { body.role = "角色".into(); }
-    let text = if body.text.is_empty() { format!("{}，您好，这是一段音色试听。", body.role) } else { body.text.clone() };
-
-    let (stored_pau, stored_pt): (String, String) = {
-        let k = voice_key(&body.project, &body.role);
-        let g = dub.lock().unwrap();
-        g.get(&k).map(|e| (e.preview_audio_url.clone(), e.preview_text.clone())).unwrap_or_default()
-    };
-    let (ds_key, tm) = {
-        let g = cfg.read().unwrap();
-        let tm = if g.dashscope_tts_model.is_empty() { "qwen3-tts-vd-realtime-2026-01-15".into() } else { g.dashscope_tts_model.clone() };
-        (g.dashscope_key.clone(), tm)
-    };
-
-    if is_real_vid(&vid) && !ds_key.is_empty() {
-        if let Ok(a) = ds_voice_preview(&ds_key, &tm, &vid, &text).await {
-            return ok_json(json!({"ok":true,"project":body.project,"role":body.role,"voiceId":vid,"previewText":text,"audioUrl":a,"provider":"dashscope","ttsModel":tm}));
-        }
-    }
-    let seed = format!("{vid}:{text}:{}", ts_ms());
-    let audio = if !body.force_regenerate && !stored_pau.is_empty() && text == stored_pt { stored_pau } else { wav_tone(&seed, 1.2) };
-    ok_json(json!({"ok":true,"project":body.project,"role":body.role,"voiceId":vid,"previewText":text,"audioUrl":audio,"provider":"local-mock"}))
-}
-
-// ============= HTTP helpers =============
-
-async fn http_post(url: &str, key: &str, payload: &Value, timeout: u64) -> Result<(u16, Value), String> {
-    let c = crate::http_client(timeout)?;
-    let r = c.post(url).bearer_auth(key).json(payload).send().await.map_err(|e| format!("req: {e}"))?;
-    let st = r.status().as_u16();
-    let t = r.text().await.map_err(|e| format!("body: {e}"))?;
-    let v: Value = serde_json::from_str(&t).unwrap_or(Value::String(t));
-    Ok((st, v))
-}
-
-async fn http_get(url: &str, key: &str, timeout: u64) -> Result<(u16, Value), String> {
-    let c = crate::http_client(timeout)?;
-    let r = c.get(url).bearer_auth(key).send().await.map_err(|e| format!("req: {e}"))?;
-    let st = r.status().as_u16();
-    let t = r.text().await.map_err(|e| format!("body: {e}"))?;
-    let v: Value = serde_json::from_str(&t).unwrap_or(Value::String(t));
-    Ok((st, v))
-}
-
-// ============= voice helpers =============
-
-fn voice_key(proj: &str, role: &str) -> String { format!("{proj}::{role}") }
-
-fn find_voice_by_id(state: &DubbingState, vid: &str) -> Option<(String, String)> {
-    for (k, e) in state.lock().unwrap().iter() {
-        if e.voice_id == vid {
-            if let Some((p, r)) = k.split_once("::") { return Some((p.to_string(), r.to_string())); }
-        }
-    }
-    None
-}
-
-fn is_real_vid(vid: &str) -> bool { !vid.is_empty() && !vid.starts_with("voice_") }
-
-async fn ds_voice_preview(key: &str, tm: &str, vid: &str, text: &str) -> Result<String, String> {
-    let c = crate::http_client(60)?;
-    for url in ["https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech",
-                "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"] {
-        let body = json!({"model":tm,"input":text,"voice":vid,"response_format":"wav"});
-        if let Ok(r) = c.post(url).bearer_auth(key).json(&body).send().await {
-            if r.status().is_success() {
-                if let Ok(b) = r.bytes().await {
-                    if !b.is_empty() { return Ok(format!("data:audio/wav;base64,{}", B64.encode(&b))); }
-                }
-            }
-        }
-    }
-    Err("dashscope voice preview failed".to_string())
-}
-
-fn pick_ds_audio(out: &Value) -> String {
-    for k in &["preview_audio","previewAudio","audio"] {
-        if let Some(v) = out.get(k) {
-            if let Some(s) = v.as_str() { if s.starts_with("data:audio/") { return s.to_string(); } return format!("data:audio/wav;base64,{s}"); }
-            if let Some(d) = v.get("data").or_else(|| v.get("base64")).and_then(|x| x.as_str()) { return format!("data:audio/wav;base64,{d}"); }
-        }
-    }
-    String::new()
-}
-
-fn sanitize_preferred(role: &str) -> String {
-    let c: String = role.chars().map(|c| if c.is_ascii_alphanumeric() || c=='-' || c=='_' { c } else { '_' }).collect();
-    let t = c.trim_matches('_'); if t.len() > 32 { t[..32].to_string() } else if t.is_empty() { format!("voice_{:x}", hash_u32(role)) } else { t.to_string() }
-}
-
-// ============= WAV mock tone generator =============
-
-fn wav_tone(seed: &str, secs: f64) -> String {
-    let sr = 22050u32; let total = ((sr as f64) * secs.max(0.3)) as usize;
-    let freq = 220.0 + (hash_u32(seed) % 300) as f64; let amp = 0.22;
-    let mut pcm = Vec::with_capacity(total * 2);
-    for i in 0..total { let t = i as f64 / sr as f64;
-        let fin = (i as f64 / (sr as f64 * 0.04)).min(1.0); let fout = ((total - i) as f64 / (sr as f64 * 0.06)).min(1.0);
-        let s = ((2.0 * std::f64::consts::PI * freq * t).sin() * amp * fin.min(fout)).clamp(-1.0, 1.0);
-        pcm.extend_from_slice(&((s * 32767.0) as i16).to_le_bytes()); }
-    let ds = pcm.len() as u32; let br = sr * 2;
-    let mut w = Vec::with_capacity(44 + pcm.len());
-    w.extend_from_slice(b"RIFF"); w.extend_from_slice(&(36u32 + ds).to_le_bytes()); w.extend_from_slice(b"WAVE");
-    w.extend_from_slice(b"fmt "); w.extend_from_slice(&16u32.to_le_bytes()); w.extend_from_slice(&1u16.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes()); w.extend_from_slice(&sr.to_le_bytes()); w.extend_from_slice(&br.to_le_bytes());
-    w.extend_from_slice(&2u16.to_le_bytes()); w.extend_from_slice(&16u16.to_le_bytes());
-    w.extend_from_slice(b"data"); w.extend_from_slice(&ds.to_le_bytes()); w.extend_from_slice(&pcm);
-    format!("data:audio/wav;base64,{}", B64.encode(&w))
-}
-
-fn hash_u32(s: &str) -> u32 { let mut h: u32 = 2166136261; for b in s.bytes() { h ^= b as u32; h = h.wrapping_mul(16777619); } h }
 
 // ============= file operations =============
 

@@ -26,10 +26,6 @@ interface Settings {
   debugToken: string;
   maxConcurrent: number;
   uploadUrl: string;
-  // --- dashscope dubbing ---
-  dashscopeKey: string;
-  dashscopeDesignModel: string;
-  dashscopeTtsModel: string;
   // --- ffmpeg for frame capture ---
   ffmpegPath: string;
 }
@@ -78,8 +74,6 @@ const LEGACY_TASKS_KEYS = ["xinghuo_tasks"];
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
-const DEFAULT_DASHSCOPE_DESIGN = "qwen-voice-design";
-const DEFAULT_DASHSCOPE_TTS = "qwen3-tts-vd-realtime-2026-01-15";
 
 function loadSettings(): Settings {
   const d: Settings = {
@@ -96,9 +90,6 @@ function loadSettings(): Settings {
     debugToken: "",
     maxConcurrent: 3,
     uploadUrl: DEFAULT_UPLOAD,
-    dashscopeKey: "",
-    dashscopeDesignModel: DEFAULT_DASHSCOPE_DESIGN,
-    dashscopeTtsModel: DEFAULT_DASHSCOPE_TTS,
     ffmpegPath: "",
   };
   try {
@@ -121,9 +112,6 @@ function loadSettings(): Settings {
         debugToken: s.debugToken ?? d.debugToken,
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
         uploadUrl: s.uploadUrl ?? d.uploadUrl,
-        dashscopeKey: s.dashscopeKey ?? d.dashscopeKey,
-        dashscopeDesignModel: s.dashscopeDesignModel ?? d.dashscopeDesignModel,
-        dashscopeTtsModel: s.dashscopeTtsModel ?? d.dashscopeTtsModel,
         ffmpegPath: s.ffmpegPath ?? d.ffmpegPath,
       };
 
@@ -180,6 +168,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="brand">🎨 灵感10s</div>
     <nav class="tabs">
       <button class="tab" data-tab="home">首页</button>
+      <button class="tab" data-tab="login">登录</button>
       <button class="tab" data-tab="t2i">文生图</button>
       <button class="tab" data-tab="i2i">图生图</button>
       <button class="tab" data-tab="video-frames">视频截帧</button>
@@ -190,7 +179,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </header>
 
   <main>
-    <!-- 首页 / 登录 -->
+    <!-- 首页：入口大厅 -->
     <section class="panel" id="panel-home">
       <div class="home-wrap">
         <div class="home-hero">
@@ -199,28 +188,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <p class="home-sub">文生图 / 图生图 桌面客户端</p>
         </div>
 
-        <!-- 未登录：账号密码登录 -->
-        <div class="home-card" id="home-login-card">
-          <h2 class="home-card-title">登录</h2>
-          <label class="field">
-            <span>用户名</span>
-            <input id="home-username" type="text" autocomplete="username" placeholder="网站登录用户名" />
-          </label>
-          <label class="field">
-            <span>密码</span>
-            <input id="home-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
-          </label>
-          <button class="primary home-block-btn" id="home-login" type="button">登录</button>
-          <div class="status" id="home-status"></div>
-          <div class="pwd-setup-hint hidden" id="home-pwd-hint"></div>
-
+        <!-- 未登录：两个入口 -->
+        <div class="home-card" id="home-start-card">
+          <button class="primary home-block-btn" id="home-go-login" type="button">登录</button>
           <div class="home-divider"><span>或</span></div>
-
           <button class="mini home-block-btn" id="home-use-apikey" type="button">我想用 API Key 使用</button>
-
           <p class="hint home-hint">
-            请求地址默认 <code>${DEFAULT_BASE}</code>，不填也会自动使用这个地址。<br />
-            账密只用于向该地址换取短期 Token，<b>密码不会保存、不会外发</b>。
+            请求地址默认 <code>${DEFAULT_BASE}</code>，不填也会自动使用这个地址。
           </p>
         </div>
 
@@ -250,6 +224,38 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <button class="mini" id="home-go-settings" type="button">打开设置</button>
             <button class="mini" id="home-logout" type="button">退出登录</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 登录 -->
+    <section class="panel hidden" id="panel-login">
+      <div class="home-wrap">
+        <div class="home-hero">
+          <div class="home-logo">🔑</div>
+          <h1 class="home-title">登录</h1>
+          <p class="home-sub">用网站账号登录，即可开始生成图片</p>
+        </div>
+
+        <div class="home-card">
+          <label class="field">
+            <span>用户名</span>
+            <input id="login-username" type="text" autocomplete="username" placeholder="网站登录用户名" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="login-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
+          </label>
+          <button class="primary home-block-btn" id="login-go" type="button">登录</button>
+          <div class="status" id="login-status"></div>
+          <div class="pwd-setup-hint hidden" id="login-pwd-hint"></div>
+
+          <div class="home-divider"><span>或</span></div>
+          <button class="mini home-block-btn" id="login-use-apikey" type="button">我想用 API Key 使用</button>
+
+          <p class="hint home-hint">
+            账密只用于向 <code>${DEFAULT_BASE}</code> 换取短期 Token，<b>密码不会保存、不会外发</b>。
+          </p>
         </div>
       </div>
     </section>
@@ -355,6 +361,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
     <!-- 漫剧工作台（内嵌本地服务提供的静态页） -->
     <section class="panel hidden" id="panel-drama" style="padding:0;overflow:hidden;">
+      <div class="status" id="drama-status" style="position:absolute;left:12px;right:12px;top:12px;z-index:2;"></div>
       <iframe id="drama-iframe" style="width:100%;height:100%;border:none;" sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>
     </section>
 
@@ -430,22 +437,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="row">
       <hr style="border-color:var(--border);margin:16px 0;" />
       <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
-        🎙️ 配音接口（DashScope / 阿里云） — 可留空，用本地模拟音
-      </p>
-      <label class="field">
-        <span>DashScope API Key</span>
-        <input id="set-dashscope-key" type="password" placeholder="sk-..." />
-      </label>
-      <label class="field">
-        <span>音色设计模型</span>
-        <input id="set-dashscope-design" type="text" placeholder="${DEFAULT_DASHSCOPE_DESIGN}" />
-      </label>
-      <label class="field">
-        <span>TTS 模型</span>
-        <input id="set-dashscope-tts" type="text" placeholder="${DEFAULT_DASHSCOPE_TTS}" />
-      </label>
-      <hr style="border-color:var(--border);margin:16px 0;" />
-      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
         🎞️ 视频截帧（ffmpeg） — 留空用系统 PATH 里的 ffmpeg
       </p>
       <label class="field">
@@ -474,7 +465,9 @@ function byId<T extends HTMLElement>(id: string): T {
 
 type StatusKind = "info" | "error" | "ok" | "busy";
 function setStatus(id: string, msg: string, kind: StatusKind = "info"): void {
-  const e = byId<HTMLDivElement>(id);
+  // 状态行写不出去不该让整个操作失败，所以这里静默降级。
+  const e = document.getElementById(id);
+  if (!e) return;
   e.textContent = msg;
   e.className = `status ${kind}`;
 }
@@ -947,9 +940,6 @@ const concurrencyInput = byId<HTMLInputElement>("set-concurrency");
 const tierSelect = byId<HTMLSelectElement>("set-tier");
 const debugTokenInput = byId<HTMLInputElement>("set-debug-token");
 const uploadInput = byId<HTMLInputElement>("set-upload");
-const dashscopeKeyInput = byId<HTMLInputElement>("set-dashscope-key");
-const dashscopeDesignInput = byId<HTMLInputElement>("set-dashscope-design");
-const dashscopeTtsInput = byId<HTMLInputElement>("set-dashscope-tts");
 const ffmpegPathInput = byId<HTMLInputElement>("set-ffmpeg-path");
 const usernameInput = byId<HTMLInputElement>("set-username");
 const passwordInput = byId<HTMLInputElement>("set-password");
@@ -959,13 +949,14 @@ const loginState = byId<HTMLSpanElement>("login-state");
 const btnAuthApiKey = byId<HTMLButtonElement>("auth-mode-apikey");
 const btnAuthPassword = byId<HTMLButtonElement>("auth-mode-password");
 
-/** Home page login form (mirrors the settings-page one). */
-const homeLoginCard = byId<HTMLDivElement>("home-login-card");
+/** Home page (start card + account card) and the dedicated login page. */
+const homeStartCard = byId<HTMLDivElement>("home-start-card");
 const homeAccountCard = byId<HTMLDivElement>("home-account-card");
-const homeUsernameInput = byId<HTMLInputElement>("home-username");
-const homePasswordInput = byId<HTMLInputElement>("home-password");
-const homeLoginBtn = byId<HTMLButtonElement>("home-login");
-const homePwdHintEl = byId<HTMLDivElement>("home-pwd-hint");
+const homeLoginTab = document.querySelector<HTMLButtonElement>('.tab[data-tab="login"]')!;
+const loginUsernameInput = byId<HTMLInputElement>("login-username");
+const loginPasswordInput = byId<HTMLInputElement>("login-password");
+const loginGoBtn = byId<HTMLButtonElement>("login-go");
+const loginPwdHintEl = byId<HTMLDivElement>("login-pwd-hint");
 const setPwdHintEl = byId<HTMLDivElement>("set-pwd-hint");
 
 /**
@@ -982,12 +973,14 @@ function renderAuthUi(): void {
   btnAuthPassword.classList.toggle("primary", isPwd);
   btnAuthPassword.classList.toggle("mini", !isPwd);
 
-  // Home page: swap the login form for the account card once we have a
+  // Home page: swap the start buttons for the account card once we have a
   // credential. In API-key mode we consider the user "ready" as soon as a
   // key is saved, so the home page doubles as a quick status board.
   const ready = isPwd ? loginValid() : !!settings.apiKey;
-  homeLoginCard.classList.toggle("hidden", ready);
+  homeStartCard.classList.toggle("hidden", ready);
   homeAccountCard.classList.toggle("hidden", !ready);
+  // The login tab only makes sense before we have a credential.
+  homeLoginTab.classList.toggle("hidden", ready);
   if (ready) {
     byId("home-account-name").textContent = isPwd ? settings.loginUser : "API Key 用户";
     byId("home-account-mode").textContent = isPwd ? "用户名 + 密码" : "API Key";
@@ -1064,12 +1057,20 @@ async function doLogout(statusId: string): Promise<void> {
   settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
   saveSettings(settings);
   passwordInput.value = "";
-  homePasswordInput.value = "";
+  loginPasswordInput.value = "";
   await syncGatewayConfig();
   renderAuthUi();
-  hidePasswordSetupHint(homePwdHintEl);
+  hidePasswordSetupHint(loginPwdHintEl);
   hidePasswordSetupHint(setPwdHintEl);
   setStatus(statusId, "已退出登录 ✓", "ok");
+}
+
+/** True when we still hold a session token that has not expired.
+ *  Unlike `loginValid()` this ignores which auth mode is currently selected,
+ *  which is what the settings switch needs to decide "do we have to log in". */
+function tokenUsable(): boolean {
+  if (!settings.loginToken) return false;
+  return !settings.loginExp || settings.loginExp * 1000 > Date.now();
 }
 
 /** Switch login mode. Switching away from password keeps the token so the
@@ -1081,7 +1082,18 @@ function setAuthMode(mode: AuthMode): void {
 }
 
 btnAuthApiKey.addEventListener("click", () => setAuthMode("apikey"));
-btnAuthPassword.addEventListener("click", () => setAuthMode("password"));
+
+// 选「用户名 + 密码」时不再在设置页里塞一个表单，直接去独立的登录页；
+// 手上已经有可用 Token 就只切模式，不用再登录一遍。
+btnAuthPassword.addEventListener("click", () => {
+  if (tokenUsable()) {
+    setAuthMode("password");
+    return;
+  }
+  homeLoginTab.classList.remove("hidden");
+  switchTab("login");
+  loginUsernameInput.focus();
+});
 
 /** Accept either key spelling — Tauri may camelCase command return values. */
 interface LoginResult {
@@ -1135,8 +1147,9 @@ async function doLogin(
     saveSettings(settings);
     // 密码只在内存里用一次，两个输入框都清空
     passwordInput.value = "";
-    homePasswordInput.value = "";
-    homeUsernameInput.value = name;
+    loginPasswordInput.value = "";
+    usernameInput.value = name;
+    loginUsernameInput.value = name;
     await syncGatewayConfig();
     renderAuthUi();
     hidePasswordSetupHint(hintEl);
@@ -1171,9 +1184,11 @@ btnLogin.addEventListener("click", async () => {
 
 btnLogout.addEventListener("click", () => doLogout("set-status"));
 
-// ---- home page wiring ----
-byId<HTMLButtonElement>("home-use-apikey").addEventListener("click", async () => {
-  // 切到 API Key 模式，把请求地址填成默认值，然后直接跳到设置页
+// ---- home page + login page wiring ----
+
+/** 两条入口公用的「我想用 API Key 使用」：切模式 → 填默认地址 → 跳设置页。 */
+async function useApiKey(): Promise<void> {
+  // 请求地址留空就用默认地址，不阻塞使用
   if (!baseInput.value.trim()) baseInput.value = DEFAULT_BASE;
   if (!settings.baseUrl) settings = { ...settings, baseUrl: DEFAULT_BASE };
   await setAuthMode("apikey");
@@ -1182,23 +1197,32 @@ byId<HTMLButtonElement>("home-use-apikey").addEventListener("click", async () =>
   switchTab("settings");
   setStatus("set-status", "已切换到 API Key 模式，填写 Key 后保存即可使用 ✓", "info");
   keyInput.focus();
+}
+
+byId<HTMLButtonElement>("home-use-apikey").addEventListener("click", () => useApiKey());
+byId<HTMLButtonElement>("login-use-apikey").addEventListener("click", () => useApiKey());
+
+byId<HTMLButtonElement>("home-go-login").addEventListener("click", () => {
+  switchTab("login");
+  loginUsernameInput.focus();
 });
 
-homeLoginBtn.addEventListener("click", async () => {
-  homeLoginBtn.disabled = true;
+loginGoBtn.addEventListener("click", async () => {
+  loginGoBtn.disabled = true;
   try {
     const ok = await doLogin(
-      homeUsernameInput.value,
-      homePasswordInput.value,
-      (msg, kind) => setStatus("home-status", msg, kind),
-      homePwdHintEl,
+      loginUsernameInput.value,
+      loginPasswordInput.value,
+      (msg, kind) => setStatus("login-status", msg, kind),
+      loginPwdHintEl,
     );
     if (ok) {
-      setStatus("home-status", "", "info");
-      switchTab("t2i");
+      setStatus("login-status", "", "info");
+      // 回首页，账户卡上直接显示账号 / 有效期
+      switchTab("home");
     }
   } finally {
-    homeLoginBtn.disabled = false;
+    loginGoBtn.disabled = false;
   }
 });
 
@@ -1209,11 +1233,21 @@ function watchPhoneUsername(input: HTMLInputElement, hintEl: HTMLElement | null)
     else hidePasswordSetupHint(hintEl);
   });
 }
-watchPhoneUsername(homeUsernameInput, homePwdHintEl);
+watchPhoneUsername(loginUsernameInput, loginPwdHintEl);
 watchPhoneUsername(usernameInput, setPwdHintEl);
 
-// 退出后「账户卡」会被隐藏，所以提示要打到登录卡的 status 上。
-byId<HTMLButtonElement>("home-logout").addEventListener("click", () => doLogout("home-status"));
+// 回车即登录
+[loginUsernameInput, loginPasswordInput].forEach((el) => {
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !loginGoBtn.disabled) loginGoBtn.click();
+  });
+});
+
+// 退出后「账户卡」会被隐藏，提示打到登录页的 status 上并把用户送过去。
+byId<HTMLButtonElement>("home-logout").addEventListener("click", async () => {
+  await doLogout("login-status");
+  switchTab("login");
+});
 byId<HTMLButtonElement>("home-go-generate").addEventListener("click", () => switchTab("t2i"));
 byId<HTMLButtonElement>("home-go-settings").addEventListener("click", () => switchTab("settings"));
 
@@ -1226,14 +1260,12 @@ function setLoginMsg(msg: string, kind: "info" | "error" | "ok"): void {
 baseInput.value = settings.baseUrl;
 keyInput.value = settings.apiKey;
 usernameInput.value = settings.loginUser;
+loginUsernameInput.value = settings.loginUser;
 timeoutInput.value = String(settings.timeoutSec);
 concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
 debugTokenInput.value = settings.debugToken;
 uploadInput.value = settings.uploadUrl;
-dashscopeKeyInput.value = settings.dashscopeKey;
-dashscopeDesignInput.value = settings.dashscopeDesignModel;
-dashscopeTtsInput.value = settings.dashscopeTtsModel;
 ffmpegPathInput.value = settings.ffmpegPath;
 // Paint the login panel last — it touches the element refs declared above.
 renderAuthUi();
@@ -1249,9 +1281,6 @@ async function syncGatewayConfig() {
         imgModel: settings.model,
         imgUploadUrl: settings.uploadUrl || "",
         imgTimeout: settings.timeoutSec,
-        dashscopeKey: settings.dashscopeKey,
-        dashscopeDesignModel: settings.dashscopeDesignModel || DEFAULT_DASHSCOPE_DESIGN,
-        dashscopeTtsModel: settings.dashscopeTtsModel || DEFAULT_DASHSCOPE_TTS,
         ffmpegPath: settings.ffmpegPath,
       },
     });
@@ -1278,9 +1307,6 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
     uploadUrl: uploadInput.value.trim() || DEFAULT_UPLOAD,
-    dashscopeKey: dashscopeKeyInput.value.trim(),
-    dashscopeDesignModel: dashscopeDesignInput.value.trim() || DEFAULT_DASHSCOPE_DESIGN,
-    dashscopeTtsModel: dashscopeTtsInput.value.trim() || DEFAULT_DASHSCOPE_TTS,
     ffmpegPath: ffmpegPathInput.value.trim(),
   };
   timeoutInput.value = String(settings.timeoutSec);
