@@ -26,10 +26,6 @@ interface Settings {
   debugToken: string;
   maxConcurrent: number;
   uploadUrl: string;
-  // --- pic2api video generation ---
-  pic2apiBase: string;
-  pic2apiKey: string;
-  pic2apiModel: string;
   // --- dashscope dubbing ---
   dashscopeKey: string;
   dashscopeDesignModel: string;
@@ -82,8 +78,6 @@ const LEGACY_TASKS_KEYS = ["xinghuo_tasks"];
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
-const DEFAULT_PIC2API_BASE = "https://www.pic2api.com/v1";
-const DEFAULT_PIC2API_MODEL = "sora2-pro";
 const DEFAULT_DASHSCOPE_DESIGN = "qwen-voice-design";
 const DEFAULT_DASHSCOPE_TTS = "qwen3-tts-vd-realtime-2026-01-15";
 
@@ -102,9 +96,6 @@ function loadSettings(): Settings {
     debugToken: "",
     maxConcurrent: 3,
     uploadUrl: DEFAULT_UPLOAD,
-    pic2apiBase: DEFAULT_PIC2API_BASE,
-    pic2apiKey: "",
-    pic2apiModel: DEFAULT_PIC2API_MODEL,
     dashscopeKey: "",
     dashscopeDesignModel: DEFAULT_DASHSCOPE_DESIGN,
     dashscopeTtsModel: DEFAULT_DASHSCOPE_TTS,
@@ -130,9 +121,6 @@ function loadSettings(): Settings {
         debugToken: s.debugToken ?? d.debugToken,
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
         uploadUrl: s.uploadUrl ?? d.uploadUrl,
-        pic2apiBase: s.pic2apiBase ?? d.pic2apiBase,
-        pic2apiKey: s.pic2apiKey ?? d.pic2apiKey,
-        pic2apiModel: s.pic2apiModel ?? d.pic2apiModel,
         dashscopeKey: s.dashscopeKey ?? d.dashscopeKey,
         dashscopeDesignModel: s.dashscopeDesignModel ?? d.dashscopeDesignModel,
         dashscopeTtsModel: s.dashscopeTtsModel ?? d.dashscopeTtsModel,
@@ -440,22 +428,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <input id="set-debug-token" type="text" placeholder="一般无需填写" />
       </label>
       <div class="row">
-      <hr style="border-color:var(--border);margin:16px 0;" />
-      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
-        🎬 视频接口（pic2api） — 漫剧工作台视频生成的独立接口
-      </p>
-      <label class="field">
-        <span>视频接口地址</span>
-        <input id="set-pic2api-base" type="text" placeholder="${DEFAULT_PIC2API_BASE}" />
-      </label>
-      <label class="field">
-        <span>视频 API Key</span>
-        <input id="set-pic2api-key" type="password" placeholder="sk-..." />
-      </label>
-      <label class="field">
-        <span>视频默认模型</span>
-        <input id="set-pic2api-model" type="text" placeholder="${DEFAULT_PIC2API_MODEL}" />
-      </label>
       <hr style="border-color:var(--border);margin:16px 0;" />
       <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
         🎙️ 配音接口（DashScope / 阿里云） — 可留空，用本地模拟音
@@ -975,9 +947,6 @@ const concurrencyInput = byId<HTMLInputElement>("set-concurrency");
 const tierSelect = byId<HTMLSelectElement>("set-tier");
 const debugTokenInput = byId<HTMLInputElement>("set-debug-token");
 const uploadInput = byId<HTMLInputElement>("set-upload");
-const pic2apiBaseInput = byId<HTMLInputElement>("set-pic2api-base");
-const pic2apiKeyInput = byId<HTMLInputElement>("set-pic2api-key");
-const pic2apiModelInput = byId<HTMLInputElement>("set-pic2api-model");
 const dashscopeKeyInput = byId<HTMLInputElement>("set-dashscope-key");
 const dashscopeDesignInput = byId<HTMLInputElement>("set-dashscope-design");
 const dashscopeTtsInput = byId<HTMLInputElement>("set-dashscope-tts");
@@ -1262,9 +1231,6 @@ concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
 debugTokenInput.value = settings.debugToken;
 uploadInput.value = settings.uploadUrl;
-pic2apiBaseInput.value = settings.pic2apiBase;
-pic2apiKeyInput.value = settings.pic2apiKey;
-pic2apiModelInput.value = settings.pic2apiModel;
 dashscopeKeyInput.value = settings.dashscopeKey;
 dashscopeDesignInput.value = settings.dashscopeDesignModel;
 dashscopeTtsInput.value = settings.dashscopeTtsModel;
@@ -1283,9 +1249,6 @@ async function syncGatewayConfig() {
         imgModel: settings.model,
         imgUploadUrl: settings.uploadUrl || "",
         imgTimeout: settings.timeoutSec,
-        pic2apiBase: settings.pic2apiBase || DEFAULT_PIC2API_BASE,
-        pic2apiKey: settings.pic2apiKey,
-        pic2apiModel: settings.pic2apiModel || DEFAULT_PIC2API_MODEL,
         dashscopeKey: settings.dashscopeKey,
         dashscopeDesignModel: settings.dashscopeDesignModel || DEFAULT_DASHSCOPE_DESIGN,
         dashscopeTtsModel: settings.dashscopeTtsModel || DEFAULT_DASHSCOPE_TTS,
@@ -1315,9 +1278,6 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
     uploadUrl: uploadInput.value.trim() || DEFAULT_UPLOAD,
-    pic2apiBase: pic2apiBaseInput.value.trim() || DEFAULT_PIC2API_BASE,
-    pic2apiKey: pic2apiKeyInput.value.trim(),
-    pic2apiModel: pic2apiModelInput.value.trim() || DEFAULT_PIC2API_MODEL,
     dashscopeKey: dashscopeKeyInput.value.trim(),
     dashscopeDesignModel: dashscopeDesignInput.value.trim() || DEFAULT_DASHSCOPE_DESIGN,
     dashscopeTtsModel: dashscopeTtsInput.value.trim() || DEFAULT_DASHSCOPE_TTS,

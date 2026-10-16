@@ -1,7 +1,9 @@
 // Embedded HTTP server: 1:1 reimplementation of grok-storyboard-preview's
 // preview-server + bridge-server.  All 16 endpoints implemented in pure Rust.
 // No python subprocess or external Node bridge needed.
-// Image gen reuses run_generation. Chat goes to sub2api. Video → pic2api HTTP.
+// Image gen reuses run_generation. Video generate (pic2api) and the chat
+// upstream (sub2api) were removed along with their settings — the workspace
+// pages that call them are unreachable while SHOW_DRAMA is false.
 // Dubbing → dashscope HTTP (with local-mock WAV fallback).
 // Frame capture → system ffmpeg.
 
@@ -23,7 +25,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::SharedConfig;
 
@@ -48,22 +50,6 @@ struct VoiceEntry {
 type DubbingState = Arc<Mutex<HashMap<String, VoiceEntry>>>;
 
 // ---------- request body structs ----------
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct VideoGenReq {
-    prompt: String,
-    model: String,
-    size: String,
-    duration: Option<u32>,
-    image_url: Option<String>,
-    image: Option<String>,
-    image_tail_url: Option<String>,
-    image_tail: Option<String>,
-    image_tail_data_url: Option<String>,
-    #[serde(default)] timeout_sec: u32,
-    #[serde(default)] poll_interval_sec: u32,
-}
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -238,7 +224,6 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/api/lobster/task", post(handle_lobster_task))
         .route("/api/character/threeview", post(handle_threeview))
         .route("/api/character/image-upload", post(handle_character_image_upload))
-        .route("/api/video/generate", post(handle_video_generate))
         .route("/api/video/save-local", post(handle_video_save))
         .route("/api/video/frame-capture", post(handle_frame_capture))
         .route("/api/video/head-image-upload", post(handle_head_upload))
@@ -604,101 +589,6 @@ async fn handle_threeview(
         Ok(_) => err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"no_image","message":"未返回图片"}})),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"call_failed","message":e}})),
     }
-}
-
-// ============= video generate (pic2api submit + poll) =============
-
-async fn handle_video_generate(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
-    Json(body): Json<VideoGenReq>,
-) -> Response {
-    let (api_base, api_key, def_model, ws) = {
-        let g = cfg.read().unwrap();
-        (g.pic2api_base.clone(), g.pic2api_key.clone(), g.pic2api_model.clone(), g.workspace_dir.clone())
-    };
-    if api_key.is_empty() {
-        return err_json(StatusCode::SERVICE_UNAVAILABLE, json!({"error":{"type":"pic2api_disabled","message":"pic2api 未配置"}}));
-    }
-    let tb = api_base.trim().trim_end_matches('/');
-    let true_base = if tb.is_empty() { "https://www.pic2api.com/v1" } else { tb };
-
-    let prompt = body.prompt.trim().to_string();
-    if prompt.is_empty() { return err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"missing_prompt","message":"缺少 prompt"}})); }
-
-    let model = if body.model.is_empty() { if def_model.is_empty() { "sora2-pro".to_string() } else { def_model } } else { body.model.clone() };
-    let size = if body.size.is_empty() { "1024x576".to_string() } else { body.size.clone() };
-    let dur = body.duration.unwrap_or(8);
-    let to = if body.timeout_sec == 0 { 480 } else { body.timeout_sec };
-    let poll_int = if body.poll_interval_sec == 0 { 4 } else { body.poll_interval_sec };
-    let mk = model.to_lowercase();
-    let allowed: &[u32] = if mk.starts_with("veo3.1") || mk.starts_with("veo3-fast") { &[4,6,8] } else { &[4,8,12] };
-    let dur = if allowed.contains(&dur) { dur } else { allowed[0] };
-
-    let head_raw = body.image_url.as_deref().or(body.image.as_deref()).unwrap_or("").trim().to_string();
-    let tail_raw = body.image_tail_url.as_deref().or(body.image_tail.as_deref()).unwrap_or("").trim().to_string();
-    let tail_data = body.image_tail_data_url.as_deref().unwrap_or("").trim().to_string();
-
-    let mut payload = json!({"model":model,"prompt":prompt,"size":size,"duration":dur});
-    if !head_raw.is_empty() {
-        let hp = resolve_ref(&head_raw, &ws);
-        if hp.exists() && hp.is_file() { if let Ok(b) = std::fs::read(&hp) { payload["image"] = json!(B64.encode(&b)); } }
-    }
-    if !tail_data.is_empty() && tail_data.starts_with("data:image/") {
-        if let Ok(p) = decode_dataurl_tmp(&ws, &tail_data) {
-            if let Ok(b) = std::fs::read(&p) { payload["image_tail"] = json!(B64.encode(&b)); }
-        }
-    } else if !tail_raw.is_empty() {
-        let tp = resolve_ref(&tail_raw, &ws);
-        if tp.exists() && tp.is_file() { if let Ok(b) = std::fs::read(&tp) { payload["image_tail"] = json!(B64.encode(&b)); } }
-    }
-
-    let sub_url = format!("{true_base}/video/generations");
-    let (st, sub) = http_post(&sub_url, &api_key, &payload, 120).await.unwrap_or((0, json!({})));
-    if st < 200 || st >= 300 {
-        return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"submit_failed","message":sub.to_string()}}));
-    }
-    let task_id = sub.get("task_id").or_else(|| sub.get("id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if task_id.is_empty() { return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"no_task_id","message":"未返回 task_id"}})); }
-
-    let poll_url = format!("{true_base}/video/generations/{task_id}");
-    let started = std::time::Instant::now();
-    loop {
-        if started.elapsed().as_secs() > to as u64 {
-            return err_json(StatusCode::GATEWAY_TIMEOUT, json!({"error":{"type":"timeout","message":"视频生成超时","taskId":task_id}}));
-        }
-        let (pst, pr) = match http_get(&poll_url, &api_key, 120).await {
-            Ok(r) => r, Err(_) => { tokio::time::sleep(Duration::from_secs(poll_int as u64)).await; continue; }
-        };
-        if pst >= 500 { tokio::time::sleep(Duration::from_secs(poll_int as u64)).await; continue; }
-        if pst < 200 || pst >= 300 {
-            return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"poll_failed","message":pr.to_string(),"taskId":task_id}}));
-        }
-        let stat = pr.get("status").or_else(|| pr.get("data").and_then(|d| d.get("status"))).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        let vurl = pick_vurl(&pr);
-        if (stat == "completed" || stat == "succeeded" || stat == "success") && !vurl.is_empty() {
-            if let Ok((_, lrel)) = download_video(&ws, &vurl, "video-gen", "S01").await {
-                return ok_json(json!({"ok":true,"taskId":task_id,"model":model,"size":size,"duration":dur,
-                    "remoteVideoUrl":vurl,"videoUrl":lrel,"localVideoUrl":lrel,"variant":format!("pic2api/{model}")}));
-            }
-            return ok_json(json!({"ok":true,"taskId":task_id,"model":model,"size":size,"duration":dur,
-                "remoteVideoUrl":vurl,"videoUrl":vurl,"localVideoUrl":"","variant":format!("pic2api/{model}"),"downloadLocalOk":false}));
-        }
-        if stat == "failed" || stat == "error" || stat == "cancelled" {
-            return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"type":"video_failed","message":format!("视频生成失败: {stat}")}}));
-        }
-        tokio::time::sleep(Duration::from_secs(poll_int as u64)).await;
-    }
-}
-
-fn pick_vurl(r: &Value) -> String {
-    if let Some(u) = r.get("output").and_then(|o| o.get("url")).and_then(|v| v.as_str()) { return u.to_string(); }
-    for k in &["url","video_url","play_url","local_url","hd_video_url"] {
-        if let Some(u) = r.get("data").and_then(|d| d.get(k)).and_then(|v| v.as_str()) { return u.to_string(); }
-    }
-    for k in &["url","video_url","play_url","local_url","hdVideoUrl"] {
-        if let Some(u) = r.get(k).and_then(|v| v.as_str()) { return u.to_string(); }
-    }
-    String::new()
 }
 
 // ============= video save-local =============

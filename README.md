@@ -116,15 +116,16 @@ npx tauri build
   - `POST /api/lobster/task` — 生成一张分镜图（复用图片接口 `run_generation`），存到项目目录。
   - `POST /api/scene-image/save-local` — 把远程图片下载保存到本地项目目录。
   - `GET  /api/projects` — 列出本地项目。
-- **凭据隔离**：图片 / 视频 / 配音的 Key 通过 `configure_gateway` 命令从设置推到 Rust 端共享状态，工作台 iframe 页面本身不持有任何 Key。
+- **凭据隔离**：图片 / 配音的 Key 通过 `configure_gateway` 命令从设置推到 Rust 端共享状态，工作台 iframe 页面本身不持有任何 Key。
 
-> 聊天接口（原 `/v1/chat/completions` 转发到 sub2api）的设置与转发已移除。
-> `web-assets/` 里的剧本助手页面仍会调用该路径；由于工作台在正式版默认隐藏
-> （`SHOW_DRAMA = false`），这些页面不可达。若要恢复工作台并重新启用剧本助手，
-> 需要同时把聊天上游配置加回来。
+> **已移除的两个上游**：聊天（`/v1/chat/completions` → sub2api）和视频生成
+> （`/api/video/generate` → pic2api）的设置与转发都已删除。
+> `web-assets/` 里的剧本助手 / 视频页面仍会调用这两个路径，但由于工作台在正式版
+> 默认隐藏（`SHOW_DRAMA = false`），这些页面不可达。若要恢复工作台并重新启用
+> 这些功能，需要把对应的上游配置一起加回来。
 - 工作台的项目数据 / 生成图保存在 `图片(Pictures)/linggan10s-image-tool/projects/`。
 
-> 视频生成 / 配音（`/api/video/*`、`/api/dubbing/*`）尚未在网关实现，属后续功能。
+> 配音（`/api/dubbing/*`）保留可用；视频生成已移除，见上方说明。
 
 ---
 
