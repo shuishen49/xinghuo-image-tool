@@ -19,6 +19,13 @@ interface Settings {
   loginToken: string;
   /// Unix seconds when `loginToken` expires; 0 = unknown (server didn't tell us).
   loginExp: number;
+  /// Opt-in "remember me": keep the password on this machine so the token can
+  /// be renewed without asking again. Off by default — nothing is stored
+  /// unless the user ticks the box on the login page.
+  rememberPassword: boolean;
+  /// Only non-empty while `rememberPassword` is true. Stored in the same
+  /// localStorage blob as every other setting, i.e. **in plain text**.
+  loginPassword: string;
   model: string;
   size: string;
   timeoutSec: number;
@@ -75,6 +82,14 @@ const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
 
+// ---------- auto renewal ----------
+// Renew once the token has less than this much left (1 day). The server hands
+// out ~7 day tokens, so this leaves plenty of slack for a machine that is
+// off for a while.
+const RENEW_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+// How often the background sweep runs.
+const RENEW_TICK_MS = 30 * 60 * 1000;
+
 function loadSettings(): Settings {
   const d: Settings = {
     baseUrl: DEFAULT_BASE,
@@ -83,6 +98,8 @@ function loadSettings(): Settings {
     loginUser: "",
     loginToken: "",
     loginExp: 0,
+    rememberPassword: false,
+    loginPassword: "",
     model: MODELS[0].value,
     size: SIZES[0].value,
     timeoutSec: 600,
@@ -105,6 +122,9 @@ function loadSettings(): Settings {
         loginUser: s.loginUser ?? d.loginUser,
         loginToken: s.loginToken ?? d.loginToken,
         loginExp: typeof s.loginExp === "number" ? s.loginExp : d.loginExp,
+        // Old builds never stored a password; treat anything missing as off.
+        rememberPassword: s.rememberPassword === true && !!s.loginPassword,
+        loginPassword: s.rememberPassword === true ? s.loginPassword ?? "" : "",
         model: s.model ?? d.model,
         size: s.size ?? d.size,
         timeoutSec: s.timeoutSec ?? d.timeoutSec,
@@ -215,6 +235,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
               <span id="home-account-exp">—</span>
             </div>
             <div class="account-row">
+              <span class="account-label">自动续期</span>
+              <span id="home-account-renew">—</span>
+            </div>
+            <div class="account-row">
               <span class="account-label">请求地址</span>
               <code id="home-account-base">—</code>
             </div>
@@ -246,6 +270,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <span>密码</span>
             <input id="login-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
           </label>
+          <label class="check-row" for="login-remember">
+            <input id="login-remember" type="checkbox" />
+            <span>记住密码，到期自动续期</span>
+          </label>
+
           <button class="primary home-block-btn" id="login-go" type="button">登录</button>
           <div class="status" id="login-status"></div>
           <div class="pwd-setup-hint hidden" id="login-pwd-hint"></div>
@@ -254,7 +283,9 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button class="mini home-block-btn" id="login-use-apikey" type="button">我想用 API Key 使用</button>
 
           <p class="hint home-hint">
-            账密只用于向 <code>${DEFAULT_BASE}</code> 换取短期 Token，<b>密码不会保存、不会外发</b>。
+            账密只用于向 <code>${DEFAULT_BASE}</code> 换取短期 Token，<b>不会发给任何第三方</b>。<br />
+            勾选「记住密码」后密码会以<b>明文</b>存在本机的设置文件里，用于到期后自动续期；
+            共用电脑或担心密码泄漏就不要勾，到期手动登录一次即可。
           </p>
         </div>
       </div>
@@ -396,6 +427,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <span>密码</span>
           <input id="set-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
         </label>
+        <label class="check-row" for="set-remember">
+          <input id="set-remember" type="checkbox" />
+          <span>记住密码，到期自动续期（密码明文存本机）</span>
+        </label>
         <div class="row" style="gap:8px;align-items:center;">
           <button class="primary" id="btn-login" type="button">登录</button>
           <button class="mini" id="btn-logout" type="button">退出登录</button>
@@ -403,8 +438,9 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         </div>
         <div class="pwd-setup-hint hidden" id="set-pwd-hint"></div>
         <p class="hint">
-          登录后只会用你的账号密码向「接口地址」换一个短期 Token，Token 保存在本机、随生图请求发出；<b>密码不会保存，也不会发给任何第三方</b>。<br />
-          Token 过期后重新点一次「登录」即可。
+          登录后只会用你的账号密码向「接口地址」换一个短期 Token，Token 保存在本机、随生图请求发出；<b>不会发给任何第三方</b>。<br />
+          勾选「记住密码」后，Token 剩余不足 1 天（或已过期）时会自动用保存的密码换一个新的，
+          启动时、每 30 分钟巡检、点「生成」前各检查一次；<b>取消勾选会立刻删掉已保存的密码</b>。
         </p>
       </div>
       <label class="field">
@@ -581,16 +617,24 @@ function loginValid(): boolean {
   return !settings.loginExp || settings.loginExp * 1000 > Date.now();
 }
 
-function ensureConfigured(statusId: string): boolean {
+/**
+ * Async because it may first try a silent token renewal — a user with
+ * "remember me" on should never be stopped by an expired token.
+ */
+async function ensureConfigured(statusId: string): Promise<boolean> {
   if (settings.authMode === "password") {
-    if (!settings.loginToken) {
-      setStatus(statusId, "请先在「首页」用用户名和密码登录。", "error");
-      switchTab("home");
-      return false;
-    }
-    if (!loginValid()) {
-      setStatus(statusId, "登录已过期，请到「首页」重新登录。", "error");
-      switchTab("home");
+    if (!settings.loginToken || !loginValid()) {
+      // threshold 0 = only renew when it has actually expired.
+      if (await autoRenew(0)) return true;
+      homeLoginTab.classList.remove("hidden");
+      setStatus(
+        statusId,
+        settings.loginToken
+          ? "登录已过期，请到「登录」页重新登录。"
+          : "请先在「登录」页用用户名和密码登录。",
+        "error",
+      );
+      switchTab("login");
       return false;
     }
   } else if (!settings.apiKey) {
@@ -957,6 +1001,8 @@ const loginUsernameInput = byId<HTMLInputElement>("login-username");
 const loginPasswordInput = byId<HTMLInputElement>("login-password");
 const loginGoBtn = byId<HTMLButtonElement>("login-go");
 const loginPwdHintEl = byId<HTMLDivElement>("login-pwd-hint");
+const loginRememberBox = byId<HTMLInputElement>("login-remember");
+const setRememberBox = byId<HTMLInputElement>("set-remember");
 const setPwdHintEl = byId<HTMLDivElement>("set-pwd-hint");
 
 /**
@@ -972,6 +1018,11 @@ function renderAuthUi(): void {
   btnAuthApiKey.classList.toggle("mini", isPwd);
   btnAuthPassword.classList.toggle("primary", isPwd);
   btnAuthPassword.classList.toggle("mini", !isPwd);
+
+  // The two "remember me" boxes mirror the same setting; keep them in sync so
+  // unchecking either one drops the stored password immediately.
+  loginRememberBox.checked = settings.rememberPassword;
+  setRememberBox.checked = settings.rememberPassword;
 
   // Home page: swap the start buttons for the account card once we have a
   // credential. In API-key mode we consider the user "ready" as soon as a
@@ -990,6 +1041,11 @@ function renderAuthUi(): void {
         : "未知"
       : "长期有效";
     byId("home-account-base").textContent = settings.baseUrl || DEFAULT_BASE;
+    byId("home-account-renew").textContent = isPwd
+      ? settings.rememberPassword
+        ? "已开启（到期自动续）"
+        : "未开启（到期需手动登录）"
+      : "不需要";
   }
 
   if (!isPwd) {
@@ -1054,7 +1110,15 @@ function hidePasswordSetupHint(el: HTMLElement | null): void {
 
 /** Forget the session token. `statusId` picks where to show the confirmation. */
 async function doLogout(statusId: string): Promise<void> {
-  settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
+  settings = {
+    ...settings,
+    loginToken: "",
+    loginUser: "",
+    loginExp: 0,
+    // 退出＝断开：连记住的密码一起清掉，否则「退出」之后还能自动登回来。
+    rememberPassword: false,
+    loginPassword: "",
+  };
   saveSettings(settings);
   passwordInput.value = "";
   loginPasswordInput.value = "";
@@ -1084,11 +1148,20 @@ function setAuthMode(mode: AuthMode): void {
 btnAuthApiKey.addEventListener("click", () => setAuthMode("apikey"));
 
 // 选「用户名 + 密码」时不再在设置页里塞一个表单，直接去独立的登录页；
-// 手上已经有可用 Token 就只切模式，不用再登录一遍。
-btnAuthPassword.addEventListener("click", () => {
+// 手上已经有可用 Token、或能用保存的密码续上，都不用再登录一遍。
+btnAuthPassword.addEventListener("click", async () => {
   if (tokenUsable()) {
     setAuthMode("password");
     return;
+  }
+  // 先切模式，autoRenew 才会考虑用保存的密码（它要求 authMode === "password"）。
+  setAuthMode("password");
+  if (canAutoRenew()) {
+    setStatus("login-status", "正在用保存的密码自动续期…", "info");
+    if (await autoRenew(0)) {
+      switchTab("home");
+      return;
+    }
   }
   homeLoginTab.classList.remove("hidden");
   switchTab("login");
@@ -1105,14 +1178,20 @@ interface LoginResult {
 }
 
 /**
- * Shared login used by both the home page and the settings page.
- * `report` pushes progress / errors into whichever panel triggered it.
+ * Shared login used by the login page, the settings page and the silent
+ * auto-renewal sweep. `report` pushes progress / errors into whichever panel
+ * triggered it; pass a no-op reporter to renew in the background.
+ *
+ * `remember` writes the password to local storage (plain text) so the token
+ * can be renewed later without asking again. Auto-renewal passes `true` to
+ * keep the existing choice; a manual login passes the checkbox state.
  */
 async function doLogin(
   username: string,
   password: string,
   report: (msg: string, kind: "info" | "error" | "ok") => void,
   hintEl: HTMLElement | null = null,
+  remember = false,
 ): Promise<boolean> {
   const user = username.trim();
   if (!user) {
@@ -1143,6 +1222,9 @@ async function doLogin(
       loginUser: name,
       loginToken: token,
       loginExp: r.expires_at ?? r.expiresAt ?? 0,
+      // Remembering is opt-in: unticking clears whatever was stored before.
+      rememberPassword: remember,
+      loginPassword: remember ? password : "",
     };
     saveSettings(settings);
     // 密码只在内存里用一次，两个输入框都清空
@@ -1176,6 +1258,7 @@ btnLogin.addEventListener("click", async () => {
       passwordInput.value,
       setLoginMsg,
       setPwdHintEl,
+      setRememberBox.checked,
     );
   } finally {
     btnLogin.disabled = false;
@@ -1183,6 +1266,107 @@ btnLogin.addEventListener("click", async () => {
 });
 
 btnLogout.addEventListener("click", () => doLogout("set-status"));
+
+// 取消勾选「记住密码」＝立刻删掉已经存下来的密码，不用等下次登录。
+function onRememberToggle(checked: boolean): void {
+  if (checked === settings.rememberPassword) return;
+  settings = {
+    ...settings,
+    rememberPassword: checked,
+    loginPassword: checked ? settings.loginPassword : "",
+  };
+  saveSettings(settings);
+  renderAuthUi();
+
+  if (!checked) {
+    setStatus("set-status", "已关闭自动续期，本机保存的密码已删除 ✓", "ok");
+    return;
+  }
+  if (settings.loginPassword) {
+    setStatus("set-status", "已开启自动续期：Token 剩余不足 1 天时会自动续 ✓", "ok");
+    return;
+  }
+  // 开了，但本机还没存过密码（比如这次是勾之前登录的）。只能让用户再登录
+  // 一次——否则「记住密码」勾了却不会生效，比没有还让人困惑。
+  homeLoginTab.classList.remove("hidden");
+  switchTab("login");
+  setStatus("login-status", "已开启自动续期。请再登录一次把密码存到本机（只需这一次）。", "info");
+}
+loginRememberBox.addEventListener("change", () => onRememberToggle(loginRememberBox.checked));
+setRememberBox.addEventListener("change", () => onRememberToggle(setRememberBox.checked));
+
+// ---------- silent token renewal ----------
+// Guards against the boot check, the periodic sweep and a pre-generate check
+// firing three overlapping logins at once.
+let renewing = false;
+// Don't re-hit the server on every "generate" click after one failure.
+let renewFailAt = 0;
+const RENEW_RETRY_MS = 5 * 60 * 1000;
+
+/**
+ * Silent renewal is only possible in password mode, with opt-in *and* a stored
+ * password. The mode check matters: `doLogin` sets `authMode = "password"` on
+ * success, so renewing while the user has deliberately switched to API Key
+ * would silently drag them back into password mode.
+ */
+function canAutoRenew(): boolean {
+  return (
+    settings.authMode === "password" &&
+    settings.rememberPassword &&
+    !!settings.loginPassword &&
+    !!settings.loginUser
+  );
+}
+
+/** True when the token is missing, or has less than `thresholdMs` left. */
+function needsRenew(thresholdMs: number): boolean {
+  if (!settings.loginToken) return true;
+  // Server didn't tell us an expiry — no way to judge, so leave it alone
+  // rather than churning a login on every sweep.
+  if (!settings.loginExp) return false;
+  return settings.loginExp * 1000 - Date.now() < thresholdMs;
+}
+
+/**
+ * Swap in a fresh token using the remembered password, without any UI noise.
+ * Never throws and never navigates: on failure it leaves a note on the login
+ * page, which is where the user ends up the moment they actually need it.
+ */
+async function autoRenew(thresholdMs: number): Promise<boolean> {
+  if (renewing || !canAutoRenew()) return false;
+  if (Date.now() - renewFailAt < RENEW_RETRY_MS) return false;
+  if (!needsRenew(thresholdMs)) return false;
+
+  renewing = true;
+  let err = "";
+  try {
+    const ok = await doLogin(
+      settings.loginUser,
+      settings.loginPassword,
+      (msg, kind) => {
+        if (kind === "error") err = msg;
+      },
+      null,
+      true, // keep the "remember" choice as-is
+    );
+    if (ok) {
+      setStatus("login-status", "", "info");
+      return true;
+    }
+  } catch (e) {
+    err = String(e);
+  } finally {
+    renewing = false;
+  }
+
+  renewFailAt = Date.now();
+  setStatus(
+    "login-status",
+    `自动续期失败：${err || "未知错误"}。若密码改过，请重新登录一次。`,
+    "error",
+  );
+  return false;
+}
 
 // ---- home page + login page wiring ----
 
@@ -1215,6 +1399,7 @@ loginGoBtn.addEventListener("click", async () => {
       loginPasswordInput.value,
       (msg, kind) => setStatus("login-status", msg, kind),
       loginPwdHintEl,
+      loginRememberBox.checked,
     );
     if (ok) {
       setStatus("login-status", "", "info");
@@ -1270,6 +1455,21 @@ ffmpegPathInput.value = settings.ffmpegPath;
 // Paint the login panel last — it touches the element refs declared above.
 renderAuthUi();
 
+// ---------- auto renewal wiring ----------
+// Both live *after* every element ref above is initialised: doLogin reads
+// `baseInput`, and touching a `const` before its declaration throws (TDZ).
+// Boot: silently refresh a token that is expired or about to expire, then
+// re-pick the landing tab in case that changed `isReady()`.
+void (async () => {
+  if (await autoRenew(RENEW_THRESHOLD_MS)) {
+    switchTab(isReady() ? "t2i" : "home");
+  }
+})();
+// Background sweep: keeps a long-running session from dropping mid-task.
+setInterval(() => {
+  void autoRenew(RENEW_THRESHOLD_MS);
+}, RENEW_TICK_MS);
+
 // Push settings to the embedded gateway (image gen + chat upstream keys).
 async function syncGatewayConfig() {
   try {
@@ -1319,10 +1519,10 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
 
 // ---------- 文生图 ----------
 const t2iSize = wireSize("t2i");
-byId<HTMLButtonElement>("t2i-go").addEventListener("click", () => {
+byId<HTMLButtonElement>("t2i-go").addEventListener("click", async () => {
   const prompt = byId<HTMLTextAreaElement>("t2i-prompt").value.trim();
   if (!prompt) return setStatus("t2i-status", "请输入提示词。", "error");
-  if (!ensureConfigured("t2i-status")) return;
+  if (!(await ensureConfigured("t2i-status"))) return;
   const size = t2iSize();
   if (size === INVALID_SIZE) return setStatus("t2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
   const model = byId<HTMLSelectElement>("t2i-model").value;
@@ -1453,11 +1653,11 @@ byId<HTMLButtonElement>("i2i-paste").addEventListener("click", async () => {
   setStatus("i2i-status", "此环境不支持按钮读取剪贴板，请直接按 Ctrl/⌘+V 粘贴图片。", "info");
 });
 
-byId<HTMLButtonElement>("i2i-go").addEventListener("click", () => {
+byId<HTMLButtonElement>("i2i-go").addEventListener("click", async () => {
   if (refImgs.length === 0) return setStatus("i2i-status", "请先添加至少一张参考图。", "error");
   const prompt = byId<HTMLTextAreaElement>("i2i-prompt").value.trim();
   if (!prompt) return setStatus("i2i-status", "请输入提示词。", "error");
-  if (!ensureConfigured("i2i-status")) return;
+  if (!(await ensureConfigured("i2i-status"))) return;
   const size = i2iSize();
   if (size === INVALID_SIZE) return setStatus("i2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
   const model = byId<HTMLSelectElement>("i2i-model").value;
