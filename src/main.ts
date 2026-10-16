@@ -203,6 +203,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="topbar">
     <div class="brand">🎨 灵感10s</div>
     <nav class="tabs">
+      <button class="tab" data-tab="home">首页</button>
       <button class="tab" data-tab="t2i">文生图</button>
       <button class="tab" data-tab="i2i">图生图</button>
       <button class="tab" data-tab="video-frames">视频截帧</button>
@@ -213,6 +214,69 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </header>
 
   <main>
+    <!-- 首页 / 登录 -->
+    <section class="panel" id="panel-home">
+      <div class="home-wrap">
+        <div class="home-hero">
+          <div class="home-logo">🎨</div>
+          <h1 class="home-title">灵感10s</h1>
+          <p class="home-sub">文生图 / 图生图 桌面客户端</p>
+        </div>
+
+        <!-- 未登录：账号密码登录 -->
+        <div class="home-card" id="home-login-card">
+          <h2 class="home-card-title">登录</h2>
+          <label class="field">
+            <span>用户名</span>
+            <input id="home-username" type="text" autocomplete="username" placeholder="网站登录用户名" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="home-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
+          </label>
+          <button class="primary home-block-btn" id="home-login" type="button">登录</button>
+          <div class="status" id="home-status"></div>
+
+          <div class="home-divider"><span>或</span></div>
+
+          <button class="mini home-block-btn" id="home-use-apikey" type="button">我想用 API Key 使用</button>
+
+          <p class="hint home-hint">
+            请求地址默认 <code>${DEFAULT_BASE}</code>，不填也会自动使用这个地址。<br />
+            账密只用于向该地址换取短期 Token，<b>密码不会保存、不会外发</b>。
+          </p>
+        </div>
+
+        <!-- 已登录：账户状态 -->
+        <div class="home-card hidden" id="home-account-card">
+          <h2 class="home-card-title">账户</h2>
+          <div class="account-box">
+            <div class="account-row">
+              <span class="account-label">当前账号</span>
+              <b id="home-account-name">—</b>
+            </div>
+            <div class="account-row">
+              <span class="account-label">登录方式</span>
+              <span id="home-account-mode">—</span>
+            </div>
+            <div class="account-row">
+              <span class="account-label">有效期至</span>
+              <span id="home-account-exp">—</span>
+            </div>
+            <div class="account-row">
+              <span class="account-label">请求地址</span>
+              <code id="home-account-base">—</code>
+            </div>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;">
+            <button class="primary" id="home-go-generate" type="button">去生成图片</button>
+            <button class="mini" id="home-go-settings" type="button">打开设置</button>
+            <button class="mini" id="home-logout" type="button">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 文生图 -->
     <section class="panel" id="panel-t2i">
       <label class="field">
@@ -583,20 +647,15 @@ function loginValid(): boolean {
 }
 
 function ensureConfigured(statusId: string): boolean {
-  if (!settings.baseUrl) {
-    setStatus(statusId, "请先在「设置」里填写 Base URL。", "error");
-    switchTab("settings");
-    return false;
-  }
   if (settings.authMode === "password") {
     if (!settings.loginToken) {
-      setStatus(statusId, "请先在「设置」里用用户名和密码登录。", "error");
-      switchTab("settings");
+      setStatus(statusId, "请先在「首页」用用户名和密码登录。", "error");
+      switchTab("home");
       return false;
     }
     if (!loginValid()) {
-      setStatus(statusId, "登录已过期，请到「设置」重新登录。", "error");
-      switchTab("settings");
+      setStatus(statusId, "登录已过期，请到「首页」重新登录。", "error");
+      switchTab("home");
       return false;
     }
   } else if (!settings.apiKey) {
@@ -667,7 +726,13 @@ function switchTab(name: string): void {
 for (const t of document.querySelectorAll<HTMLButtonElement>(".tab")) {
   t.addEventListener("click", () => switchTab(t.dataset.tab!));
 }
-switchTab("t2i");
+// 未配置任何凭证时先落在首页（登录入口），否则直接进文生图。
+function isReady(): boolean {
+  return settings.authMode === "password"
+    ? loginValid()
+    : !!settings.apiKey;
+}
+switchTab(isReady() ? "t2i" : "home");
 
 // ---------- gateway / drama workspace ----------
 // Hidden in the official build (see SHOW_DRAMA), but kept intact so flipping
@@ -789,7 +854,8 @@ function renderTasks(): void {
 function buildReq(t: Task) {
   const useToken = settings.authMode === "password";
   return {
-    baseUrl: settings.baseUrl,
+    // 请求地址留空就用默认地址，不让用户卡在这一步
+    baseUrl: (settings.baseUrl || DEFAULT_BASE).trim(),
     apiKey: useToken ? "" : settings.apiKey,
     token: useToken ? settings.loginToken : undefined,
     model: t.model,
@@ -959,6 +1025,13 @@ const loginState = byId<HTMLSpanElement>("login-state");
 const btnAuthApiKey = byId<HTMLButtonElement>("auth-mode-apikey");
 const btnAuthPassword = byId<HTMLButtonElement>("auth-mode-password");
 
+/** Home page login form (mirrors the settings-page one). */
+const homeLoginCard = byId<HTMLDivElement>("home-login-card");
+const homeAccountCard = byId<HTMLDivElement>("home-account-card");
+const homeUsernameInput = byId<HTMLInputElement>("home-username");
+const homePasswordInput = byId<HTMLInputElement>("home-password");
+const homeLoginBtn = byId<HTMLButtonElement>("home-login");
+
 /**
  * Show the panel matching the current `authMode` and paint the login state.
  * Called on boot, on mode switch, and after a successful login.
@@ -972,6 +1045,23 @@ function renderAuthUi(): void {
   btnAuthApiKey.classList.toggle("mini", isPwd);
   btnAuthPassword.classList.toggle("primary", isPwd);
   btnAuthPassword.classList.toggle("mini", !isPwd);
+
+  // Home page: swap the login form for the account card once we have a
+  // credential. In API-key mode we consider the user "ready" as soon as a
+  // key is saved, so the home page doubles as a quick status board.
+  const ready = isPwd ? loginValid() : !!settings.apiKey;
+  homeLoginCard.classList.toggle("hidden", ready);
+  homeAccountCard.classList.toggle("hidden", !ready);
+  if (ready) {
+    byId("home-account-name").textContent = isPwd ? settings.loginUser : "API Key 用户";
+    byId("home-account-mode").textContent = isPwd ? "用户名 + 密码" : "API Key";
+    byId("home-account-exp").textContent = isPwd
+      ? settings.loginExp
+        ? new Date(settings.loginExp * 1000).toLocaleString()
+        : "未知"
+      : "长期有效";
+    byId("home-account-base").textContent = settings.baseUrl || DEFAULT_BASE;
+  }
 
   if (!isPwd) {
     loginState.textContent = "";
@@ -990,6 +1080,17 @@ function renderAuthUi(): void {
     ? `已登录：${settings.loginUser}（Token 已于 ${when} 过期，请重新登录）`
     : `已登录：${settings.loginUser}（有效期至 ${when}）`;
   loginState.style.color = expired ? "var(--err, #f85149)" : "var(--ok, #3fb950)";
+}
+
+/** Forget the session token. `statusId` picks where to show the confirmation. */
+async function doLogout(statusId: string): Promise<void> {
+  settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
+  saveSettings(settings);
+  passwordInput.value = "";
+  homePasswordInput.value = "";
+  await syncGatewayConfig();
+  renderAuthUi();
+  setStatus(statusId, "已退出登录 ✓", "ok");
 }
 
 /** Switch login mode. Switching away from password keeps the token so the
@@ -1012,50 +1113,105 @@ interface LoginResult {
   expiresAt?: number;
 }
 
-btnLogin.addEventListener("click", async () => {
-  const base = baseInput.value.trim() || DEFAULT_BASE;
-  const username = usernameInput.value.trim();
-  const password = passwordInput.value; // 密码不做 trim，末尾空格是合法的
-  if (!username) return setLoginMsg("请输入用户名。", "error");
-  if (!password) return setLoginMsg("请输入密码。", "error");
+/**
+ * Shared login used by both the home page and the settings page.
+ * `report` pushes progress / errors into whichever panel triggered it.
+ */
+async function doLogin(
+  username: string,
+  password: string,
+  report: (msg: string, kind: "info" | "error" | "ok") => void,
+): Promise<boolean> {
+  const user = username.trim();
+  if (!user) {
+    report("请输入用户名。", "error");
+    return false;
+  }
+  // 密码不做 trim，末尾空格是合法的
+  if (!password) {
+    report("请输入密码。", "error");
+    return false;
+  }
 
-  btnLogin.disabled = true;
-  setLoginMsg("登录中…", "info");
+  report("登录中…", "info");
   try {
-    const r = await invoke<LoginResult>("platform_login", { base, username, password });
+    // 请求地址留空就用默认地址，不阻塞登录
+    const base = (baseInput.value.trim() || settings.baseUrl || DEFAULT_BASE).trim();
+    const r = await invoke<LoginResult>("platform_login", { base, username: user, password });
     const token = r.access_token ?? r.accessToken ?? "";
-    const name = r.username ?? username;
+    const name = r.username ?? user;
     if (!token) {
-      setLoginMsg("登录响应里没有 access_token，请重试。", "error");
-      return;
+      report("登录响应里没有 access_token，请重试。", "error");
+      return false;
     }
     settings = {
       ...settings,
+      baseUrl: settings.baseUrl || DEFAULT_BASE,
       authMode: "password",
       loginUser: name,
       loginToken: token,
       loginExp: r.expires_at ?? r.expiresAt ?? 0,
     };
     saveSettings(settings);
+    // 密码只在内存里用一次，两个输入框都清空
     passwordInput.value = "";
+    homePasswordInput.value = "";
+    homeUsernameInput.value = name;
     await syncGatewayConfig();
     renderAuthUi();
-    setStatus("set-status", `已登录：${name} ✓`, "ok");
+    report(`已登录：${name} ✓`, "ok");
+    return true;
   } catch (e) {
-    setLoginMsg(`登录失败：${String(e)}`, "error");
+    report(`登录失败：${String(e)}`, "error");
+    return false;
+  }
+}
+
+btnLogin.addEventListener("click", async () => {
+  btnLogin.disabled = true;
+  try {
+    await doLogin(usernameInput.value, passwordInput.value, setLoginMsg);
   } finally {
     btnLogin.disabled = false;
   }
 });
 
-btnLogout.addEventListener("click", async () => {
-  settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
+btnLogout.addEventListener("click", () => doLogout("set-status"));
+
+// ---- home page wiring ----
+byId<HTMLButtonElement>("home-use-apikey").addEventListener("click", async () => {
+  // 切到 API Key 模式，把请求地址填成默认值，然后直接跳到设置页
+  if (!baseInput.value.trim()) baseInput.value = DEFAULT_BASE;
+  if (!settings.baseUrl) settings = { ...settings, baseUrl: DEFAULT_BASE };
+  await setAuthMode("apikey");
   saveSettings(settings);
-  passwordInput.value = "";
   await syncGatewayConfig();
-  renderAuthUi();
-  setStatus("set-status", "已退出登录 ✓", "ok");
+  switchTab("settings");
+  setStatus("set-status", "已切换到 API Key 模式，填写 Key 后保存即可使用 ✓", "info");
+  keyInput.focus();
 });
+
+homeLoginBtn.addEventListener("click", async () => {
+  homeLoginBtn.disabled = true;
+  try {
+    const ok = await doLogin(
+      homeUsernameInput.value,
+      homePasswordInput.value,
+      (msg, kind) => setStatus("home-status", msg, kind),
+    );
+    if (ok) {
+      setStatus("home-status", "", "info");
+      switchTab("t2i");
+    }
+  } finally {
+    homeLoginBtn.disabled = false;
+  }
+});
+
+// 退出后「账户卡」会被隐藏，所以提示要打到登录卡的 status 上。
+byId<HTMLButtonElement>("home-logout").addEventListener("click", () => doLogout("home-status"));
+byId<HTMLButtonElement>("home-go-generate").addEventListener("click", () => switchTab("t2i"));
+byId<HTMLButtonElement>("home-go-settings").addEventListener("click", () => switchTab("settings"));
 
 function setLoginMsg(msg: string, kind: "info" | "error" | "ok"): void {
   loginState.textContent = msg;
