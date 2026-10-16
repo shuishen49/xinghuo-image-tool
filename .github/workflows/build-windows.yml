@@ -78,7 +78,24 @@ jobs:
         run: npm ci
 
       - name: tauri build (frontend + Rust release + installer)
-        run: npx tauri build
+        id: tauri_build
+        shell: bash
+        run: |
+          npx tauri build 2>&1 | tee build.log
+          exit "${PIPESTATUS[0]}"
+
+      # Surface compiler errors in the job summary so a failure is readable
+      # straight from the Actions page without downloading the full log.
+      - name: Export failure log
+        if: failure() && steps.tauri_build.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo '## tauri build 失败'
+            echo '```'
+            grep -nE '^(error|error\[|warning: unused)' -A 8 build.log | tail -n 150
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect artifacts
         shell: pwsh

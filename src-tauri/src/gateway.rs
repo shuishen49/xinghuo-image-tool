@@ -493,6 +493,8 @@ async fn handle_scene_variant(
         (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
          g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
+    // Empty token = API-key mode; the backend needs the `token` header omitted.
+    let img_token_opt: Option<&str> = if img_token.is_empty() { None } else { Some(&img_token) };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE,
             json!({"error":{"type":"linggan_disabled","message":"图片接口未配置"}}));
@@ -501,7 +503,7 @@ async fn handle_scene_variant(
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 120 } else { img_timeout };
     let refs = vec![gateway_image_ref(&img)];
-    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
+    match crate::run_generation(&img_base, &img_key, img_token_opt, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -533,6 +535,8 @@ async fn handle_lobster_task(
         (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
          g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
+    // Empty token = API-key mode; the backend needs the `token` header omitted.
+    let img_token_opt: Option<&str> = if img_token.is_empty() { None } else { Some(&img_token) };
 
     let mut refs: Vec<String> = Vec::new();
     for u in [&p.image_url, &p.source_image_url] {
@@ -550,7 +554,7 @@ async fn handle_lobster_task(
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 600 } else { img_timeout };
 
-    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("1080x1920"), &refs, to, None, None, upload_url).await {
+    match crate::run_generation(&img_base, &img_key, img_token_opt, model, &prompt, Some("1080x1920"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime) = (&list[0].0, &list[0].1);
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -581,6 +585,8 @@ async fn handle_threeview(
         (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
          g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
+    // Empty token = API-key mode; the backend needs the `token` header omitted.
+    let img_token_opt: Option<&str> = if img_token.is_empty() { None } else { Some(&img_token) };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE, json!({"error":{"type":"missing_auth","message":"图片接口未配置"}}));
     }
@@ -589,7 +595,7 @@ async fn handle_threeview(
     let to = if img_timeout == 0 { 120 } else { img_timeout };
     let refs: Vec<String> = vec![];
 
-    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("16:9"), &refs, to, None, None, up).await {
+    match crate::run_generation(&img_base, &img_key, img_token_opt, model, &prompt, Some("16:9"), &refs, to, None, None, up).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
