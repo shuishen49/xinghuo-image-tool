@@ -9,7 +9,7 @@ use axum::{
     body::Body,
     extract::{Path as AxPath, Query, State},
     extract::DefaultBodyLimit,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -244,9 +244,6 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/api/video/head-image-upload", post(handle_head_upload))
         .route("/api/dubbing/voice/design", post(handle_voice_design))
         .route("/api/dubbing/voice/preview", post(handle_voice_preview))
-        .route("/v1/chat/completions", post(handle_chat))
-        .route("/chat/completions", post(handle_chat))
-        .route("/api/chat/completions", post(handle_chat))
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .with_state((cfg, dub))
 }
@@ -896,70 +893,6 @@ async fn handle_voice_preview(
     let seed = format!("{vid}:{text}:{}", ts_ms());
     let audio = if !body.force_regenerate && !stored_pau.is_empty() && text == stored_pt { stored_pau } else { wav_tone(&seed, 1.2) };
     ok_json(json!({"ok":true,"project":body.project,"role":body.role,"voiceId":vid,"previewText":text,"audioUrl":audio,"provider":"local-mock"}))
-}
-
-// ============= chat completions =============
-
-async fn handle_chat(
-    State((cfg, _)): State<(SharedConfig, DubbingState)>,
-    _headers: HeaderMap,
-    Json(mut body): Json<Value>,
-) -> Response {
-    let (base, key, model) = {
-        let g = cfg.read().unwrap();
-        (g.chat_base.clone(), g.chat_key.clone(), g.chat_model.clone())
-    };
-    if base.is_empty() { return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":"chat upstream not configured"}})); }
-    if !model.is_empty() { body["model"] = json!(model); }
-
-    let url = chat_url(&base);
-    if key.is_empty() {
-        return err_json(StatusCode::BAD_GATEWAY,
-            json!({"error":{"message":"聊天接口未配置 API Key，请在设置页的「漫剧工作台 · 聊天接口」填写"}}));
-    }
-
-    // Force streaming on the upstream call. A long generation (e.g. story
-    // segmentation) makes a non-streaming request hang until the upstream nginx
-    // idle-timeout fires a 504. With stream=true the upstream emits SSE chunks
-    // continuously, keeping the connection alive, and we pipe them straight to
-    // the client. The frontend reassembles the SSE deltas.
-    body["stream"] = json!(true);
-
-    // Long timeout for the whole stream; SSE keeps the socket busy so this is
-    // a safety cap, not the thing that usually fires.
-    let client = match crate::http_client(900) {
-        Ok(c) => c,
-        Err(e) => return err_json(StatusCode::BAD_GATEWAY, json!({"error":{"message":e}})),
-    };
-    let rb = client.post(&url).json(&body).bearer_auth(&key);
-
-    match rb.send().await {
-        Ok(r) => {
-            let st = r.status();
-            if !st.is_success() {
-                // Surface upstream error body verbatim (often JSON or an nginx page)
-                let t = r.text().await.unwrap_or_default();
-                return Response::builder().status(st)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(t)).unwrap();
-            }
-            // Stream the SSE body straight through, no buffering.
-            let stream = r.bytes_stream();
-            Response::builder().status(st)
-                .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .body(Body::from_stream(stream)).unwrap()
-        }
-        Err(e) => err_json(StatusCode::BAD_GATEWAY,
-            json!({"error":{"message":format!("聊天接口请求失败：{e}")}})),
-    }
-}
-
-fn chat_url(base: &str) -> String {
-    let b = base.trim().trim_end_matches('/');
-    if b.ends_with("/chat/completions") { b.to_string() }
-    else if b.ends_with("/v1") { format!("{b}/chat/completions") }
-    else { format!("{b}/v1/chat/completions") }
 }
 
 // ============= HTTP helpers =============

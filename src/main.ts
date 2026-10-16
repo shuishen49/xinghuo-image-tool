@@ -26,10 +26,6 @@ interface Settings {
   debugToken: string;
   maxConcurrent: number;
   uploadUrl: string;
-  // --- drama workspace chat upstream (sub2api) ---
-  chatBase: string;
-  chatKey: string;
-  chatModel: string;
   // --- pic2api video generation ---
   pic2apiBase: string;
   pic2apiKey: string;
@@ -86,8 +82,6 @@ const LEGACY_TASKS_KEYS = ["xinghuo_tasks"];
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
-const DEFAULT_CHAT_BASE = "https://sub.linggan10s.shop/v1";
-const DEFAULT_CHAT_MODEL = "gpt-5.5";
 const DEFAULT_PIC2API_BASE = "https://www.pic2api.com/v1";
 const DEFAULT_PIC2API_MODEL = "sora2-pro";
 const DEFAULT_DASHSCOPE_DESIGN = "qwen-voice-design";
@@ -108,9 +102,6 @@ function loadSettings(): Settings {
     debugToken: "",
     maxConcurrent: 3,
     uploadUrl: DEFAULT_UPLOAD,
-    chatBase: DEFAULT_CHAT_BASE,
-    chatKey: "",
-    chatModel: DEFAULT_CHAT_MODEL,
     pic2apiBase: DEFAULT_PIC2API_BASE,
     pic2apiKey: "",
     pic2apiModel: DEFAULT_PIC2API_MODEL,
@@ -139,9 +130,6 @@ function loadSettings(): Settings {
         debugToken: s.debugToken ?? d.debugToken,
         maxConcurrent: s.maxConcurrent ?? d.maxConcurrent,
         uploadUrl: s.uploadUrl ?? d.uploadUrl,
-        chatBase: s.chatBase ?? d.chatBase,
-        chatKey: s.chatKey ?? d.chatKey,
-        chatModel: s.chatModel ?? d.chatModel,
         pic2apiBase: s.pic2apiBase ?? d.pic2apiBase,
         pic2apiKey: s.pic2apiKey ?? d.pic2apiKey,
         pic2apiModel: s.pic2apiModel ?? d.pic2apiModel,
@@ -451,26 +439,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <span>调试 Token（debug_chatgpt_token，可留空）</span>
         <input id="set-debug-token" type="text" placeholder="一般无需填写" />
       </label>
-      <hr style="border-color:var(--border);margin:16px 0;" />
-      <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
-        🎬 漫剧工作台 · 聊天接口（sub2api 标准 OpenAI 兼容） — 用于剧本助手 / 台词生成等，与上方图片接口独立
-      </p>
-      <label class="field">
-        <span>聊天接口地址 (Chat Base URL)</span>
-        <input id="set-chat-base" type="text" placeholder="${DEFAULT_CHAT_BASE}" />
-      </label>
-      <label class="field">
-        <span>聊天 API Key</span>
-        <input id="set-chat-key" type="password" placeholder="sk-..." />
-      </label>
-      <label class="field">
-        <span>聊天模型</span>
-        <input id="set-chat-model" type="text" placeholder="${DEFAULT_CHAT_MODEL}" />
-      </label>
-      <div class="row" style="gap:8px;align-items:center;">
-        <button id="btn-test-chat" class="btn" type="button">测试聊天接口</button>
-        <span id="chat-test-result" style="font-size:13px;color:var(--muted);"></span>
-      </div>
       <div class="row">
       <hr style="border-color:var(--border);margin:16px 0;" />
       <p style="color:var(--muted);font-size:13px;margin:0 0 8px;">
@@ -1007,11 +975,6 @@ const concurrencyInput = byId<HTMLInputElement>("set-concurrency");
 const tierSelect = byId<HTMLSelectElement>("set-tier");
 const debugTokenInput = byId<HTMLInputElement>("set-debug-token");
 const uploadInput = byId<HTMLInputElement>("set-upload");
-const chatBaseInput = byId<HTMLInputElement>("set-chat-base");
-const chatKeyInput = byId<HTMLInputElement>("set-chat-key");
-const chatModelInput = byId<HTMLInputElement>("set-chat-model");
-const btnTestChat = byId<HTMLButtonElement>("btn-test-chat");
-const chatTestResult = byId<HTMLSpanElement>("chat-test-result");
 const pic2apiBaseInput = byId<HTMLInputElement>("set-pic2api-base");
 const pic2apiKeyInput = byId<HTMLInputElement>("set-pic2api-key");
 const pic2apiModelInput = byId<HTMLInputElement>("set-pic2api-model");
@@ -1299,9 +1262,6 @@ concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
 debugTokenInput.value = settings.debugToken;
 uploadInput.value = settings.uploadUrl;
-chatBaseInput.value = settings.chatBase;
-chatKeyInput.value = settings.chatKey;
-chatModelInput.value = settings.chatModel;
 pic2apiBaseInput.value = settings.pic2apiBase;
 pic2apiKeyInput.value = settings.pic2apiKey;
 pic2apiModelInput.value = settings.pic2apiModel;
@@ -1323,9 +1283,6 @@ async function syncGatewayConfig() {
         imgModel: settings.model,
         imgUploadUrl: settings.uploadUrl || "",
         imgTimeout: settings.timeoutSec,
-        chatBase: settings.chatBase || DEFAULT_CHAT_BASE,
-        chatKey: settings.chatKey,
-        chatModel: settings.chatModel || DEFAULT_CHAT_MODEL,
         pic2apiBase: settings.pic2apiBase || DEFAULT_PIC2API_BASE,
         pic2apiKey: settings.pic2apiKey,
         pic2apiModel: settings.pic2apiModel || DEFAULT_PIC2API_MODEL,
@@ -1339,26 +1296,6 @@ async function syncGatewayConfig() {
     // gateway sync is best-effort; ignore if not ready yet
   }
 }
-
-btnTestChat.addEventListener("click", async () => {
-  btnTestChat.disabled = true;
-  chatTestResult.textContent = "测试中…";
-  chatTestResult.style.color = "var(--muted)";
-  try {
-    const msg = await invoke<string>("test_chat_base", {
-      base: chatBaseInput.value.trim() || DEFAULT_CHAT_BASE,
-      key: chatKeyInput.value.trim(),
-      model: chatModelInput.value.trim() || DEFAULT_CHAT_MODEL,
-    });
-    chatTestResult.textContent = msg;
-    chatTestResult.style.color = "var(--ok)";
-  } catch (e) {
-    chatTestResult.textContent = String(e);
-    chatTestResult.style.color = "var(--err)";
-  } finally {
-    btnTestChat.disabled = false;
-  }
-});
 
 byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
   const t = parseInt(timeoutInput.value, 10);
@@ -1378,9 +1315,6 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
     accountTier: tierSelect.value,
     debugToken: debugTokenInput.value.trim(),
     uploadUrl: uploadInput.value.trim() || DEFAULT_UPLOAD,
-    chatBase: chatBaseInput.value.trim() || DEFAULT_CHAT_BASE,
-    chatKey: chatKeyInput.value.trim(),
-    chatModel: chatModelInput.value.trim() || DEFAULT_CHAT_MODEL,
     pic2apiBase: pic2apiBaseInput.value.trim() || DEFAULT_PIC2API_BASE,
     pic2apiKey: pic2apiKeyInput.value.trim(),
     pic2apiModel: pic2apiModelInput.value.trim() || DEFAULT_PIC2API_MODEL,

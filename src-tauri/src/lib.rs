@@ -35,13 +35,6 @@ pub struct GatewayConfig {
     pub img_upload_url: String,
     #[serde(default)]
     pub img_timeout: u32,
-    // --- chat upstream (sub2api) ---
-    #[serde(default)]
-    pub chat_base: String,
-    #[serde(default)]
-    pub chat_key: String,
-    #[serde(default)]
-    pub chat_model: String,
     // --- pic2api video generation ---
     #[serde(default)]
     pub pic2api_base: String,
@@ -755,9 +748,6 @@ fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) 
     guard.img_model = cfg.img_model;
     guard.img_upload_url = cfg.img_upload_url;
     guard.img_timeout = cfg.img_timeout;
-    guard.chat_base = cfg.chat_base;
-    guard.chat_key = cfg.chat_key;
-    guard.chat_model = cfg.chat_model;
     guard.pic2api_base = cfg.pic2api_base;
     guard.pic2api_key = cfg.pic2api_key;
     guard.pic2api_model = cfg.pic2api_model;
@@ -773,45 +763,6 @@ fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) 
 fn gateway_url(state: tauri::State<'_, SharedConfig>) -> String {
     let port = state.read().unwrap().self_port;
     format!("http://127.0.0.1:{port}")
-}
-
-#[tauri::command]
-async fn test_chat_base(base: String, key: String, model: String) -> Result<String, String> {
-    let b = base.trim().trim_end_matches('/');
-    if b.is_empty() {
-        return Err("Base URL 为空".into());
-    }
-    let url = if b.ends_with("/chat/completions") {
-        b.to_string()
-    } else if b.ends_with("/v1") {
-        format!("{b}/chat/completions")
-    } else {
-        format!("{b}/v1/chat/completions")
-    };
-    let client = http_client(30).map_err(|e| e)?;
-    let payload = serde_json::json!({
-        "model": if model.trim().is_empty() { "gpt-4o-mini".to_string() } else { model.trim().to_string() },
-        "messages": [{"role":"user","content":"ping"}],
-        "max_tokens": 1,
-        "stream": false
-    });
-    let mut rb = client.post(&url).json(&payload);
-    if !key.trim().is_empty() {
-        rb = rb.bearer_auth(key.trim());
-    }
-    match rb.send().await {
-        Ok(r) => {
-            let st = r.status();
-            if st.is_success() {
-                Ok(format!("连接正常 (HTTP {})", st.as_u16()))
-            } else {
-                let body = r.text().await.unwrap_or_default();
-                let snippet: String = body.chars().take(160).collect();
-                Err(format!("HTTP {}：{}", st.as_u16(), snippet))
-            }
-        }
-        Err(e) => Err(format!("请求失败：{e}")),
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -851,7 +802,6 @@ pub fn run() {
             read_saved_image,
             configure_gateway,
             gateway_url,
-            test_chat_base,
             platform_login
         ])
         .run(tauri::generate_context!())
