@@ -661,3 +661,21 @@ button:disabled {
   font-size: 12px;
   word-break: break-all;
 }
+
+.pwd-setup-hint {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(109, 139, 255, 0.08);
+}
+
+.pwd-setup-hint .pwd-hint {
+  margin: 0;
+  line-height: 1.75;
+}
+
+.pwd-setup-hint a {
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}

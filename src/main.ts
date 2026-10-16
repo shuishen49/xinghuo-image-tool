@@ -236,6 +236,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           </label>
           <button class="primary home-block-btn" id="home-login" type="button">登录</button>
           <div class="status" id="home-status"></div>
+          <div class="pwd-setup-hint hidden" id="home-pwd-hint"></div>
 
           <div class="home-divider"><span>或</span></div>
 
@@ -417,6 +418,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <button class="mini" id="btn-logout" type="button">退出登录</button>
           <span id="login-state" style="font-size:13px;color:var(--muted);"></span>
         </div>
+        <div class="pwd-setup-hint hidden" id="set-pwd-hint"></div>
         <p class="hint">
           登录后只会用你的账号密码向「接口地址」换一个短期 Token，Token 保存在本机、随生图请求发出；<b>密码不会保存，也不会发给任何第三方</b>。<br />
           Token 过期后重新点一次「登录」即可。
@@ -1031,6 +1033,8 @@ const homeAccountCard = byId<HTMLDivElement>("home-account-card");
 const homeUsernameInput = byId<HTMLInputElement>("home-username");
 const homePasswordInput = byId<HTMLInputElement>("home-password");
 const homeLoginBtn = byId<HTMLButtonElement>("home-login");
+const homePwdHintEl = byId<HTMLDivElement>("home-pwd-hint");
+const setPwdHintEl = byId<HTMLDivElement>("set-pwd-hint");
 
 /**
  * Show the panel matching the current `authMode` and paint the login state.
@@ -1082,6 +1086,47 @@ function renderAuthUi(): void {
   loginState.style.color = expired ? "var(--err, #f85149)" : "var(--ok, #3fb950)";
 }
 
+/**
+ * Accounts created through phone SMS verification start out with no password
+ * (`password` is NULL server-side), so a username+password login can never
+ * succeed for them and the backend only says "密码错误". Detect the likely
+ * case and point the user at the page where they can set one.
+ */
+const PASSWORD_SETUP_URL = "https://linggan10s.shop/profile";
+
+function looksLikePhone(u: string): boolean {
+  return /^1[3-9]\d{9}$/.test(u.trim());
+}
+
+function showPasswordSetupHint(el: HTMLElement | null): void {
+  if (!el) return;
+  el.textContent = "";
+  const p = document.createElement("p");
+  p.className = "hint pwd-hint";
+  const b = document.createElement("b");
+  b.textContent = "手机验证码";
+  const a = document.createElement("a");
+  a.href = PASSWORD_SETUP_URL;
+  a.target = "_blank";
+  a.rel = "noreferrer";
+  a.textContent = PASSWORD_SETUP_URL;
+  p.append(
+    "如果你是",
+    b,
+    "注册 / 登录的用户，账号默认没有密码，请先到 ",
+    a,
+    " 点击「账户设置」→「设置密码」，设置完成后再回来登录。",
+  );
+  el.appendChild(p);
+  el.classList.remove("hidden");
+}
+
+function hidePasswordSetupHint(el: HTMLElement | null): void {
+  if (!el) return;
+  el.classList.add("hidden");
+  el.textContent = "";
+}
+
 /** Forget the session token. `statusId` picks where to show the confirmation. */
 async function doLogout(statusId: string): Promise<void> {
   settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
@@ -1090,6 +1135,8 @@ async function doLogout(statusId: string): Promise<void> {
   homePasswordInput.value = "";
   await syncGatewayConfig();
   renderAuthUi();
+  hidePasswordSetupHint(homePwdHintEl);
+  hidePasswordSetupHint(setPwdHintEl);
   setStatus(statusId, "已退出登录 ✓", "ok");
 }
 
@@ -1121,6 +1168,7 @@ async function doLogin(
   username: string,
   password: string,
   report: (msg: string, kind: "info" | "error" | "ok") => void,
+  hintEl: HTMLElement | null = null,
 ): Promise<boolean> {
   const user = username.trim();
   if (!user) {
@@ -1159,10 +1207,18 @@ async function doLogin(
     homeUsernameInput.value = name;
     await syncGatewayConfig();
     renderAuthUi();
+    hidePasswordSetupHint(hintEl);
     report(`已登录：${name} ✓`, "ok");
     return true;
   } catch (e) {
-    report(`登录失败：${String(e)}`, "error");
+    const msg = String(e);
+    report(`登录失败：${msg}`, "error");
+    // 手机号用户名，或报错提到密码 —— 都可能是「手机注册未设密码」
+    if (looksLikePhone(username) || /密码|password/i.test(msg)) {
+      showPasswordSetupHint(hintEl);
+    } else {
+      hidePasswordSetupHint(hintEl);
+    }
     return false;
   }
 }
@@ -1170,7 +1226,12 @@ async function doLogin(
 btnLogin.addEventListener("click", async () => {
   btnLogin.disabled = true;
   try {
-    await doLogin(usernameInput.value, passwordInput.value, setLoginMsg);
+    await doLogin(
+      usernameInput.value,
+      passwordInput.value,
+      setLoginMsg,
+      setPwdHintEl,
+    );
   } finally {
     btnLogin.disabled = false;
   }
@@ -1198,6 +1259,7 @@ homeLoginBtn.addEventListener("click", async () => {
       homeUsernameInput.value,
       homePasswordInput.value,
       (msg, kind) => setStatus("home-status", msg, kind),
+      homePwdHintEl,
     );
     if (ok) {
       setStatus("home-status", "", "info");
@@ -1207,6 +1269,16 @@ homeLoginBtn.addEventListener("click", async () => {
     homeLoginBtn.disabled = false;
   }
 });
+
+// 用户名填的是手机号 → 提前提示：手机验证码注册的账号默认没有密码
+function watchPhoneUsername(input: HTMLInputElement, hintEl: HTMLElement | null): void {
+  input.addEventListener("input", () => {
+    if (looksLikePhone(input.value)) showPasswordSetupHint(hintEl);
+    else hidePasswordSetupHint(hintEl);
+  });
+}
+watchPhoneUsername(homeUsernameInput, homePwdHintEl);
+watchPhoneUsername(usernameInput, setPwdHintEl);
 
 // 退出后「账户卡」会被隐藏，所以提示要打到登录卡的 status 上。
 byId<HTMLButtonElement>("home-logout").addEventListener("click", () => doLogout("home-status"));
