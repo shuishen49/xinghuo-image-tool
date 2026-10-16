@@ -8,6 +8,7 @@
 use axum::{
     body::Body,
     extract::{Path as AxPath, Query, State},
+    extract::DefaultBodyLimit,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -92,6 +93,16 @@ struct HeadUploadReq {
     project: String,
     #[serde(default, alias = "segmentId", alias = "sid")]
     segment_id: String,
+    #[serde(default)] image_data_url: String,
+    #[serde(default)] file_name: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CharacterImageUploadReq {
+    project: String,
+    #[serde(default, alias = "characterName", alias = "name")]
+    character_name: String,
     #[serde(default)] image_data_url: String,
     #[serde(default)] file_name: String,
 }
@@ -226,6 +237,7 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/api/scene-image/variant", post(handle_scene_variant))
         .route("/api/lobster/task", post(handle_lobster_task))
         .route("/api/character/threeview", post(handle_threeview))
+        .route("/api/character/image-upload", post(handle_character_image_upload))
         .route("/api/video/generate", post(handle_video_generate))
         .route("/api/video/save-local", post(handle_video_save))
         .route("/api/video/frame-capture", post(handle_frame_capture))
@@ -235,6 +247,7 @@ fn build_router(cfg: SharedConfig, dub: DubbingState) -> Router {
         .route("/v1/chat/completions", post(handle_chat))
         .route("/chat/completions", post(handle_chat))
         .route("/api/chat/completions", post(handle_chat))
+        .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .with_state((cfg, dub))
 }
 
@@ -475,10 +488,10 @@ async fn handle_scene_variant(
         return err_json(StatusCode::BAD_REQUEST,
             json!({"error":{"type":"missing_field","message":"缺少 imageUrl / prompt"}}));
     }
-    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
+    let (img_base, img_key, img_token, img_model, img_upload_url, img_timeout) = {
         let g = cfg.read().unwrap();
-        (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout)
+        (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
+         g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE,
@@ -488,7 +501,7 @@ async fn handle_scene_variant(
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 120 } else { img_timeout };
     let refs = vec![gateway_image_ref(&img)];
-    match crate::run_generation(&img_base, &img_key, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
+    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("1024x1792"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -515,10 +528,10 @@ async fn handle_lobster_task(
     let prompt = (!p.image_prompt.is_empty()).then(|| p.image_prompt.clone())
         .unwrap_or_default();
 
-    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
+    let (img_base, img_key, img_token, img_model, img_upload_url, img_timeout) = {
         let g = cfg.read().unwrap();
-        (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(),
-         g.img_upload_url.clone(), g.img_timeout)
+        (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
+         g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
 
     let mut refs: Vec<String> = Vec::new();
@@ -537,7 +550,7 @@ async fn handle_lobster_task(
     let upload_url: Option<&str> = if img_upload_url.is_empty() { None } else { Some(&img_upload_url) };
     let to = if img_timeout == 0 { 600 } else { img_timeout };
 
-    match crate::run_generation(&img_base, &img_key, model, &prompt, Some("864x1536"), &refs, to, None, None, upload_url).await {
+    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("1080x1920"), &refs, to, None, None, upload_url).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime) = (&list[0].0, &list[0].1);
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -563,9 +576,10 @@ async fn handle_threeview(
     if base.is_empty() { return err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"missing_prompt","message":"缺少 prompt"}})); }
     let prompt = format!("{base}\n构图硬约束：必须16:9横版（禁止9:16竖版），统一角色形象，三视图（正面/侧面/背面）一致。");
 
-    let (img_base, img_key, img_model, img_upload_url, img_timeout) = {
+    let (img_base, img_key, img_token, img_model, img_upload_url, img_timeout) = {
         let g = cfg.read().unwrap();
-        (g.img_base.clone(), g.img_key.clone(), g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
+        (g.img_base.clone(), g.img_key.clone(), g.img_token.clone(),
+         g.img_model.clone(), g.img_upload_url.clone(), g.img_timeout)
     };
     if img_base.is_empty() || img_key.is_empty() {
         return err_json(StatusCode::SERVICE_UNAVAILABLE, json!({"error":{"type":"missing_auth","message":"图片接口未配置"}}));
@@ -575,7 +589,7 @@ async fn handle_threeview(
     let to = if img_timeout == 0 { 120 } else { img_timeout };
     let refs: Vec<String> = vec![];
 
-    match crate::run_generation(&img_base, &img_key, model, &prompt, Some("16:9"), &refs, to, None, None, up).await {
+    match crate::run_generation(&img_base, &img_key, img_token, model, &prompt, Some("16:9"), &refs, to, None, None, up).await {
         Ok(list) if !list.is_empty() => {
             let (bytes, mime, _) = &list[0];
             let ws = { cfg.read().unwrap().workspace_dir.clone() };
@@ -759,6 +773,27 @@ async fn handle_head_upload(
     let ws = { cfg.read().unwrap().workspace_dir.clone() };
     match save_dataurl_scene(&ws, &body.image_data_url, &body.project, &body.segment_id, &body.file_name) {
         Ok((_, rel)) => ok_json(json!({"ok":true,"project":body.project,"segmentId":body.segment_id,"localImageUrl":rel})),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"upload_failed","message":e}})),
+    }
+}
+
+async fn handle_character_image_upload(
+    State((cfg, _)): State<(SharedConfig, DubbingState)>,
+    Json(body): Json<CharacterImageUploadReq>,
+) -> Response {
+    let project = body.project.trim().to_string();
+    let name = body.character_name.trim().to_string();
+    if project.is_empty() || name.is_empty() || body.image_data_url.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"missing_field","message":"缺少 project/characterName/imageDataUrl"}}));
+    }
+    let ws = { cfg.read().unwrap().workspace_dir.clone() };
+    match save_dataurl_character(&ws, &body.image_data_url, &project, &name, &body.file_name) {
+        Ok((_, rel)) => {
+            if let Err(e) = save_character_image_override_to_disk(&ws, &project, &name, &rel) {
+                return err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"save_override_failed","message":e}}));
+            }
+            ok_json(json!({"ok":true,"project":project,"characterName":name,"imageUrl":rel,"localImageUrl":rel}))
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, json!({"error":{"type":"upload_failed","message":e}})),
     }
 }
@@ -1064,6 +1099,39 @@ fn save_dataurl_scene(ws: &Path, dataurl: &str, proj: &str, seg: &str, fname: &s
     let a = d.join(&n);
     std::fs::write(&a, &bytes).map_err(|e| format!("write: {e}"))?;
     Ok((a, format!("./generated/scenes/{n}")))
+}
+
+fn save_dataurl_character(ws: &Path, dataurl: &str, proj: &str, name: &str, fname: &str) -> Result<(PathBuf, String), String> {
+    let (bytes, ext) = parse_dataurl(dataurl)?;
+    let d = ws.join("generated").join("characters");
+    std::fs::create_dir_all(&d).map_err(|e| format!("mkdir: {e}"))?;
+    let file_stem = std::path::Path::new(fname)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "upload".into());
+    let stem = sanitize_file_stem(&format!("{proj}-{name}-{file_stem}"));
+    let n = format!("{stem}-{}.{ext}", ts_ms());
+    let a = d.join(&n);
+    std::fs::write(&a, &bytes).map_err(|e| format!("write: {e}"))?;
+    Ok((a, format!("./generated/characters/{n}")))
+}
+
+fn save_character_image_override_to_disk(ws: &Path, proj: &str, name: &str, rel: &str) -> Result<(), String> {
+    let dir = ws.join(proj).join("planning");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let path = dir.join("character-image-overrides.json");
+    let mut root: Value = if path.exists() {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
+        serde_json::from_str(&text).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    if !root.is_object() { root = json!({}); }
+    let key = name.trim().to_lowercase();
+    root[&key] = json!(rel);
+    let text = serde_json::to_string_pretty(&root).map_err(|e| format!("json: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("write: {e}"))?;
+    Ok(())
 }
 
 fn decode_dataurl_tmp(ws: &Path, dataurl: &str) -> Result<String, String> {

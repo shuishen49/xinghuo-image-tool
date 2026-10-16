@@ -1915,7 +1915,7 @@ function renderSegmentCastModalRows(){
         <td><input type="checkbox" ${checked} onchange="toggleSegmentCastModalSelect('${escapeHtml(project)}','${escapeHtml(sid)}','${escapeHtml(c.name)}', this.checked)" /></td>
         <td>${nameCell}</td>
         <td>${escapeHtml(c.notes || '-')}</td>
-        <td>${c.imageUrl ? `<a href="javascript:void(0)" class="segment-cast-thumb" data-img="${escapeHtml(c.imageUrl)}" data-sid="${escapeHtml(c.name)}"><img src="${escapeHtml(c.imageUrl)}" alt="${escapeHtml(c.name)}" class="segment-cast-avatar"/></a>` : `<button type="button" class="cast-upload-btn" title="上传角色图片" onclick="uploadCastCharacterImage('${escapeHtml(c.name)}')">上传图片</button>`}</td>
+        <td>${c.imageUrl ? `<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;"><a href="javascript:void(0)" class="segment-cast-thumb" data-img="${escapeHtml(c.imageUrl)}" data-sid="${escapeHtml(c.name)}"><img src="${escapeHtml(c.imageUrl)}" alt="${escapeHtml(c.name)}" class="segment-cast-avatar"/></a><button type="button" class="cast-upload-btn" data-role="paste-cast-image" data-name="${nameEnc}" title="从剪贴板粘贴图片">粘贴图片</button></div>` : `<div style="display:flex;gap:6px;flex-wrap:wrap;"><button type="button" class="cast-upload-btn" title="上传角色图片" onclick="uploadCastCharacterImage('${escapeHtml(c.name)}')">上传图片</button><button type="button" class="cast-upload-btn" data-role="paste-cast-image" data-name="${nameEnc}" title="从剪贴板粘贴图片">粘贴图片</button></div>`}</td>
         <td>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             <button type="button" class="btn-ghost" data-role="rename-cast" data-project="${projectEnc}" data-sid="${sidEnc}" data-name="${nameEnc}">改名</button>
@@ -1930,6 +1930,50 @@ function renderSegmentCastModalRows(){
 
   const hint = q('segmentCastSelectedHint');
   if(hint) hint.textContent = `已选 ${selected.size} 人：${[...selected].join('、') || '无'}`;
+}
+
+async function saveCastCharacterImageDataUrl(name = '', dataUrl = '', fileName = 'clipboard.png'){
+  const cleanName = String(name || '').trim();
+  if(!cleanName){ setStatus('角色名为空', false); return false; }
+  if(!currentSegmentCastModal){ setStatus('弹窗未打开', false); return false; }
+  const project = String(currentSegmentCastModal.project || currentProjectName || '').trim();
+  if(!project){ setStatus('项目为空，无法保存角色图', false); return false; }
+
+  setStatus(`正在保存 ${cleanName} 的角色图片…`);
+  try {
+    const base = getBridgeBase();
+    const resp = await fetch(`${base}/api/character/image-upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project,
+        characterName: cleanName,
+        imageDataUrl: dataUrl,
+        fileName: String(fileName || '').trim() || 'clipboard.png',
+      }),
+    });
+    const data = await resp.json().catch(()=>({}));
+    if(!resp.ok || !data?.ok){
+      throw new Error(data?.error?.message || data?.error?.type || `HTTP ${resp.status}`);
+    }
+
+    const imageUrl = String(data.localImageUrl || data.imageUrl || '').trim();
+    if(!imageUrl) throw new Error('未返回本地图片地址');
+    setProjectCharacterImageOverride(project, cleanName, imageUrl);
+    if(currentSegmentCastModal.candidates){
+      currentSegmentCastModal.candidates = currentSegmentCastModal.candidates.map(c =>
+        String(c?.name || '').trim() === cleanName ? { ...c, imageUrl } : c
+      );
+    }
+    renderSegmentCastModalRows();
+    renderSegmentCastGlobalPicker();
+    refreshSegmentCastCell(project, currentSegmentCastModal.sid);
+    setStatus(`已保存 ${cleanName} 的角色图片`);
+    return true;
+  } catch (err) {
+    setStatus(`保存角色图片失败：${err?.message || err}`, false);
+    return false;
+  }
 }
 
 function uploadCastCharacterImage(characterName){
@@ -1947,8 +1991,8 @@ function uploadCastCharacterImage(characterName){
     const file = input.files?.[0];
     input.remove();
     if(!file) return;
-    if(file.size > 5 * 1024 * 1024){
-      setStatus('图片不能超过 5MB', false);
+    if(file.size > 12 * 1024 * 1024){
+      setStatus('图片不能超过 12MB', false);
       return;
     }
     if(!/^image\//i.test(String(file.type || ''))){
@@ -1956,7 +2000,6 @@ function uploadCastCharacterImage(characterName){
       return;
     }
 
-    setStatus(`正在上传 ${name} 的角色图片…`);
     try {
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1964,44 +2007,42 @@ function uploadCastCharacterImage(characterName){
         reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
         reader.readAsDataURL(file);
       });
-
-      const project = String(currentSegmentCastModal.project || currentProjectName || '').trim();
-      const base = getBridgeBase();
-      const resp = await fetch(`${base}/api/video/head-image-upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project: project,
-          segmentId: `cast-${normalizeCharacterNameKey(name)}`,
-          imageDataUrl: dataUrl,
-          fileName: String(file.name || '').trim(),
-        }),
-      });
-      const data = await resp.json().catch(()=>({}));
-      if(!resp.ok || !data?.ok){
-        throw new Error(data?.error?.message || data?.error?.type || `HTTP ${resp.status}`);
-      }
-
-      const imageUrl = String(data.localImageUrl || '').trim();
-      if(imageUrl){
-        setProjectCharacterImageOverride(project, name, imageUrl);
-        // update candidates in-place and re-render
-        if(currentSegmentCastModal.candidates){
-          currentSegmentCastModal.candidates = currentSegmentCastModal.candidates.map(c =>
-            String(c?.name || '').trim() === name ? { ...c, imageUrl } : c
-          );
-        }
-        renderSegmentCastModalRows();
-        renderSegmentCastGlobalPicker();
-        refreshSegmentCastCell(project, currentSegmentCastModal.sid);
-        setStatus(`已上传 ${name} 的角色图片`);
-      }
+      await saveCastCharacterImageDataUrl(name, String(dataUrl || ''), String(file.name || '').trim());
     } catch (err) {
-      setStatus(`上传角色图片失败：${err?.message || err}`, false);
+      setStatus(`读取角色图片失败：${err?.message || err}`, false);
     }
   };
 
   input.click();
+}
+
+async function pasteCastCharacterImage(characterName = ''){
+  const name = String(characterName || '').trim();
+  if(!name){ setStatus('角色名为空', false); return; }
+  const read = navigator.clipboard?.read?.bind(navigator.clipboard);
+  if(!read){
+    setStatus('当前环境不支持按钮读取剪贴板，请先选择“上传图片”。', false);
+    return;
+  }
+  try{
+    const items = await read();
+    for(const item of items){
+      const type = item.types.find(t => String(t || '').startsWith('image/'));
+      if(!type) continue;
+      const blob = await item.getType(type);
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error || new Error('读取剪贴板图片失败'));
+        reader.readAsDataURL(blob);
+      });
+      await saveCastCharacterImageDataUrl(name, String(dataUrl || ''), `clipboard.${String(type.split('/')[1] || 'png').split(/[;+]/)[0]}`);
+      return;
+    }
+    setStatus('剪贴板里没有图片，请先复制一张图片。', false);
+  }catch(err){
+    setStatus(`粘贴图片失败：${err?.message || err}`, false);
+  }
 }
 
 function applySegmentCastRename(projectEnc, sidEnc, nameEnc, nextNameRaw = ''){
@@ -5736,7 +5777,7 @@ document.addEventListener('keydown', (e)=>{
   const segmentCastRowsEl = q('segmentCastRows');
   if(segmentCastRowsEl){
     segmentCastRowsEl.addEventListener('click', (e) => {
-      const btn = e.target?.closest?.('button[data-role="rename-cast"], button[data-role="delete-cast"], button[data-role="save-rename-cast"], button[data-role="cancel-rename-cast"]');
+      const btn = e.target?.closest?.('button[data-role="rename-cast"], button[data-role="delete-cast"], button[data-role="save-rename-cast"], button[data-role="cancel-rename-cast"], button[data-role="paste-cast-image"]');
       if(!btn) return;
       e.preventDefault();
       e.stopPropagation();
@@ -5750,6 +5791,7 @@ document.addEventListener('keydown', (e)=>{
       const name = String(btn.getAttribute('data-name') || '');
       console.info('[segment-cast] action clicked', { role: btn.getAttribute('data-role'), project, sid, name });
       if(btn.getAttribute('data-role') === 'rename-cast') renameSegmentCastCandidate(project, sid, name);
+      else if(btn.getAttribute('data-role') === 'paste-cast-image') pasteCastCharacterImage(decodeURIComponent(name));
       else if(btn.getAttribute('data-role') === 'save-rename-cast'){
         const input = btn.closest('td')?.querySelector?.('input[data-role="rename-cast-input"]');
         applySegmentCastRename(project, sid, name, input?.value || '');

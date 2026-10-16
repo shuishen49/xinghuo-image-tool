@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "XinghuoImageTool",
+  "productName": "Linggan10sImageTool",
   "version": "0.1.0",
-  "identifier": "com.xinghuo.imagetool",
+  "identifier": "com.linggan10s.imagetool",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "星火图片工具 · 文生图 / 图生图",
+        "title": "灵感10s · 文生图 / 图生图",
         "width": 1040,
         "height": 760,
         "minWidth": 760,

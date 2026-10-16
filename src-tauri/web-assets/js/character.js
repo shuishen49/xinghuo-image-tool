@@ -352,8 +352,10 @@ async function reloadGlobalCharacterLibrary(){
 async function fetchCharacters(project){
   const charsUrl = `./${project}/planning/characters-confirmed.json`;
   const promptsUrl = `./${project}/prompts/character-image-prompts.json`;
+  const imageOverridesUrl = `./${project}/planning/character-image-overrides.json`;
   let chars = [];
   let promptItems = [];
+  let diskImageOverrides = {};
   try {
     const raw = await fetchJson(charsUrl);
     chars = normalizeCharacters(raw, 'project', project);
@@ -361,6 +363,13 @@ async function fetchCharacters(project){
   try {
     const raw = await fetchJson(promptsUrl);
     promptItems = Array.isArray(raw?.items) ? raw.items : [];
+  } catch {}
+  try {
+    const raw = await fetchJson(imageOverridesUrl);
+    diskImageOverrides = raw && typeof raw === 'object' ? raw : {};
+    for(const [key, imageUrl] of Object.entries(diskImageOverrides)){
+      if(String(imageUrl || '').trim()) setProjectCharacterImageOverride(project, key, String(imageUrl || '').trim());
+    }
   } catch {}
   const promptMap = {};
   for(const it of promptItems){
@@ -370,7 +379,11 @@ async function fetchCharacters(project){
     if(key1 && val) promptMap[key1] = val;
     if(key2 && val) promptMap[key2] = val;
   }
-  return chars.map(ch => ({ ...ch, prompt: ch.prompt || promptMap[ch.id] || promptMap[ch.name] || '' }));
+  return chars.map(ch => {
+    const overrideKey = normalizeCharacterNameKey(ch.name || ch.id || '');
+    const diskImageUrl = String(diskImageOverrides[overrideKey] || '').trim();
+    return { ...ch, imageUrl: diskImageUrl || ch.imageUrl || '', prompt: ch.prompt || promptMap[ch.id] || promptMap[ch.name] || '' };
+  });
 }
 
 function renderCharacterPlanPanel(){

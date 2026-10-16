@@ -12,7 +12,7 @@ if not exist "node_modules" (
   if errorlevel 1 goto :error
 )
 
-call npx.cmd tauri build
+call "%~dp0node_modules\.bin\tauri.cmd" build
 if errorlevel 1 goto :error
 
 popd

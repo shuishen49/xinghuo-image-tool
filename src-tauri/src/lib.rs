@@ -25,6 +25,10 @@ pub struct GatewayConfig {
     pub img_base: String,
     #[serde(default)]
     pub img_key: String,
+    /// Session JWT from username/password login. When non-empty it is sent in
+    /// the `token` header instead of `Authorization: Bearer <img_key>`.
+    #[serde(default)]
+    pub img_token: String,
     #[serde(default)]
     pub img_model: String,
     #[serde(default)]
@@ -78,6 +82,9 @@ pub type SharedConfig = Arc<RwLock<GatewayConfig>>;
 struct GenReq {
     base_url: String,
     api_key: String,
+    /// Session JWT from `platform_login`. When present it replaces the API key.
+    #[serde(default)]
+    token: Option<String>,
     model: String,
     prompt: String,
     #[serde(default)]
@@ -175,6 +182,58 @@ pub(crate) fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> 
         .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))
+}
+
+/// How to authenticate against the upstream platform.
+///
+/// The backend accepts two mutually exclusive credentials (see
+/// `HybridAuthControl`): an API key in `Authorization: Bearer …`, or a session
+/// JWT in the plain `token` header. Passing both is pointless — the `token`
+/// header always wins — so the client sends exactly one.
+#[derive(Clone, Copy)]
+pub(crate) enum UpstreamAuth<'a> {
+    ApiKey(&'a str),
+    Token(&'a str),
+    /// Anonymous (third-party image hosts configured by the user).
+    Anonymous,
+}
+
+impl<'a> UpstreamAuth<'a> {
+    fn apply(self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            UpstreamAuth::ApiKey(k) => rb.bearer_auth(k),
+            UpstreamAuth::Token(t) => rb.header("token", t),
+            UpstreamAuth::Anonymous => rb,
+        }
+    }
+}
+
+/// Pick the credential to use for a request: a session token when the user
+/// logged in with username/password, otherwise the API key.
+fn resolve_auth<'a>(api_key: &'a str, token: Option<&'a str>) -> UpstreamAuth<'a> {
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => UpstreamAuth::Token(t),
+        None => UpstreamAuth::ApiKey(api_key),
+    }
+}
+
+/// Decode a JWT's `exp` claim (unix seconds) without verifying the signature.
+/// Returns 0 when it can't be read — the caller then just shows "unknown".
+fn jwt_exp(token: &str) -> i64 {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return 0;
+    }
+    // JWT uses base64url (-_ and no padding); STANDARD wants +/ and padding.
+    let seg = parts[1].replace('-', "+").replace('_', "/");
+    let padded = format!("{}{}", seg, "=".repeat((4 - seg.len() % 4) % 4));
+    let Ok(bytes) = B64.decode(padded) else {
+        return 0;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("exp").and_then(|e| e.as_i64()))
+        .unwrap_or(0)
 }
 
 pub(crate) fn ext_for(mime: &str) -> &'static str {
@@ -293,12 +352,14 @@ fn extract_uploaded_url(v: &serde_json::Value) -> Option<String> {
         .or_else(|| pick(v["file"]["url"].as_str()))
 }
 
-/// Upload raw image bytes to the host (multipart `file` field, Bearer auth)
-/// and return the public http(s) URL it responds with.
+/// Upload raw image bytes to the host (multipart `file` field) and return the
+/// public http(s) URL it responds with. `api_key = None` means a third-party
+/// host that takes anonymous uploads.
 async fn upload_image(
     c: &reqwest::Client,
     upload_url: &str,
     api_key: Option<&str>,
+    token: Option<&str>,
     bytes: Vec<u8>,
     mime: &str,
 ) -> Result<String, String> {
@@ -307,13 +368,15 @@ async fn upload_image(
         .mime_str(mime)
         .map_err(|e| format!("构造上传数据失败: {e}"))?;
     let form = reqwest::multipart::Form::new().part("file", part);
-    // The platform OSS endpoint authenticates with the API key; a third-party
-    // host (if explicitly configured) takes anonymous uploads (api_key = None).
-    let mut rb = c.post(upload_url).multipart(form);
-    if let Some(key) = api_key {
-        rb = rb.bearer_auth(key);
-    }
-    let resp = rb
+    // The platform OSS endpoint authenticates with the same credential used for
+    // generation (API key or session token); a third-party host (if explicitly
+    // configured) takes anonymous uploads.
+    let auth = match api_key {
+        Some(key) => resolve_auth(key, token),
+        None => UpstreamAuth::Anonymous,
+    };
+    let resp = auth
+        .apply(c.post(upload_url).multipart(form))
         .send()
         .await
         .map_err(|e| format!("上传图片失败: {e}"))?;
@@ -341,6 +404,7 @@ async fn ref_to_url(
     c: &reqwest::Client,
     upload_url: &str,
     api_key: Option<&str>,
+    token: Option<&str>,
     src: &str,
 ) -> Result<String, String> {
     let s = src.trim();
@@ -348,7 +412,7 @@ async fn ref_to_url(
         return Ok(s.to_string());
     }
     let (bytes, mime) = resolve_src(c, s).await?;
-    upload_image(c, upload_url, api_key, bytes, &mime).await
+    upload_image(c, upload_url, api_key, token, bytes, &mime).await
 }
 
 fn is_loopback_url(s: &str) -> bool {
@@ -361,7 +425,7 @@ fn is_loopback_url(s: &str) -> bool {
         || low.starts_with("https://[::1]")
 }
 
-/// Save bytes under <Pictures>/xinghuo-image-tool/ and return the absolute path.
+/// Save bytes under <Pictures>/linggan10s-image-tool/ and return the absolute path.
 fn save_image(
     app: &tauri::AppHandle,
     bytes: &[u8],
@@ -374,7 +438,7 @@ fn save_image(
         .picture_dir()
         .or_else(|_| app.path().app_data_dir())
         .map_err(|e| format!("无法定位保存目录: {e}"))?;
-    let dir = base_dir.join("xinghuo-image-tool");
+    let dir = base_dir.join("linggan10s-image-tool");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -412,6 +476,7 @@ fn to_out(
 pub async fn run_generation(
     base_url: &str,
     api_key: &str,
+    session_token: Option<&str>,
     model: &str,
     prompt: &str,
     size: Option<&str>,
@@ -428,6 +493,8 @@ pub async fn run_generation(
     let timeout_sec = timeout_sec.clamp(10, 1800);
     let c = http_client(timeout_sec as u64 + 60)?;
 
+    let auth = resolve_auth(api_key, session_token);
+
     let mut body = serde_json::json!({
         "model": model,
         "prompt": prompt,
@@ -441,17 +508,19 @@ pub async fn run_generation(
         let custom_host = upload_url_override
             .map(str::trim)
             .filter(|s| !s.is_empty() && !s.contains("imageproxy.zhongzhuan.chat"));
-        let (upload_url, upload_key): (String, Option<&str>) = match custom_host {
-            Some(host) => (host.to_string(), None),
-            None => (
-                format!("{base}/api/v1/uploads/upload?public=true"),
-                Some(api_key),
-            ),
-        };
+        let (upload_url, upload_key, upload_token): (String, Option<&str>, Option<&str>) =
+            match custom_host {
+                Some(host) => (host.to_string(), None, None),
+                None => (
+                    format!("{base}/api/v1/uploads/upload?public=true"),
+                    Some(api_key),
+                    session_token,
+                ),
+            };
         eprintln!("[run_generation] 参考图上传到: {upload_url}");
         let mut ref_urls: Vec<String> = Vec::with_capacity(raw_refs.len());
         for src in &raw_refs {
-            ref_urls.push(ref_to_url(&c, &upload_url, upload_key, src).await?);
+            ref_urls.push(ref_to_url(&c, &upload_url, upload_key, upload_token, src).await?);
         }
         eprintln!("[run_generation] 参考图 URL: {ref_urls:?}");
         body["image"] = serde_json::json!(ref_urls);
@@ -465,14 +534,14 @@ pub async fn run_generation(
     }
 
     let url = format!("{base}/v1/images/generations");
-    let max_attempts: u32 = 3;
+    // Every generation request is charged, even on failure. Never auto-retry.
+    let max_attempts: u32 = 1;
     let mut attempt: u32 = 0;
     let text = loop {
         attempt += 1;
         let started = std::time::Instant::now();
-        let send_result = c
-            .post(&url)
-            .bearer_auth(api_key)
+        let send_result = auth
+            .apply(c.post(&url))
             .json(&body)
             .send()
             .await;
@@ -564,6 +633,7 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     let outs = run_generation(
         &req.base_url,
         &req.api_key,
+        req.token.as_deref(),
         &req.model,
         &req.prompt,
         req.size.as_deref(),
@@ -583,6 +653,95 @@ async fn generate_images(app: tauri::AppHandle, req: GenReq) -> Result<Vec<Image
     Ok(result)
 }
 
+/// What `platform_login` hands back to the frontend.
+#[derive(Serialize)]
+struct LoginOut {
+    access_token: String,
+    username: String,
+    /// Unix seconds when the JWT expires; 0 when it couldn't be decoded.
+    expires_at: i64,
+}
+
+/// Exchange a username + password for a session JWT.
+///
+/// Hits `POST {base}/api/v1/base/access_token` — the same endpoint the web app
+/// logs in through. The resulting token is sent in the `token` header on the
+/// generate / upload calls, which is the other credential the backend accepts
+/// alongside `Authorization: Bearer <api key>`.
+///
+/// The password is never trimmed (trailing spaces are legal) and is not stored
+/// anywhere — only the returned token is handed back to the frontend.
+#[tauri::command]
+async fn platform_login(base: String, username: String, password: String) -> Result<LoginOut, String> {
+    let b = normalize_base(&base);
+    if b.is_empty() {
+        return Err("请先填写接口地址 (Base URL)".into());
+    }
+    let user = username.trim();
+    if user.is_empty() {
+        return Err("请输入用户名".into());
+    }
+    if password.is_empty() {
+        return Err("请输入密码".into());
+    }
+
+    let client = http_client(30)?;
+    let url = format!("{b}/api/v1/base/access_token");
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "username": user, "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("登录请求失败：{e}"))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取登录响应失败：{e}"))?;
+
+    let v = serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("解析登录响应失败：{e}"))?;
+
+    // FastAPI validation / HTTP errors come back as {"detail": "..."}.
+    if let Some(detail) = v.get("detail").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        return Err(detail.to_string());
+    }
+
+    let code = v.get("code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 200 {
+        let msg = v
+            .get("msg")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("登录失败（HTTP {}）", status.as_u16()));
+        return Err(msg);
+    }
+
+    let data = &v["data"];
+    let access_token = data
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if access_token.is_empty() {
+        return Err("登录响应里没有 access_token".into());
+    }
+    let name = data
+        .get("username")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(user)
+        .to_string();
+
+    Ok(LoginOut {
+        expires_at: jwt_exp(&access_token),
+        access_token,
+        username: name,
+    })
+}
+
 /// Push upstream credentials from the frontend into the gateway's shared state.
 /// Called whenever the user saves settings, so the iframe'd drama workspace can
 /// generate storyboard images, chat, video (pic2api) and voice (dashscope) without
@@ -592,6 +751,7 @@ fn configure_gateway(state: tauri::State<'_, SharedConfig>, cfg: GatewayConfig) 
     let mut guard = state.write().unwrap();
     guard.img_base = cfg.img_base;
     guard.img_key = cfg.img_key;
+    guard.img_token = cfg.img_token;
     guard.img_model = cfg.img_model;
     guard.img_upload_url = cfg.img_upload_url;
     guard.img_timeout = cfg.img_timeout;
@@ -666,15 +826,15 @@ pub fn run() {
                 )?;
             }
 
-            // Workspace dir: <Pictures>/xinghuo-image-tool/projects (shares the
+            // Workspace dir: <Pictures>/linggan10s-image-tool/projects (shares the
             // root where generated images already land). The gateway serves
             // project JSON + saved scene images out of here.
             let workspace_dir = app
                 .path()
                 .picture_dir()
                 .or_else(|_| app.path().app_data_dir())
-                .map(|d| d.join("xinghuo-image-tool").join("projects"))
-                .unwrap_or_else(|_| std::env::temp_dir().join("xinghuo-projects"));
+                .map(|d| d.join("linggan10s-image-tool").join("projects"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("linggan10s-projects"));
             let _ = std::fs::create_dir_all(&workspace_dir);
 
             let config: SharedConfig = Arc::new(RwLock::new(GatewayConfig {
@@ -691,7 +851,8 @@ pub fn run() {
             read_saved_image,
             configure_gateway,
             gateway_url,
-            test_chat_base
+            test_chat_base,
+            platform_login
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

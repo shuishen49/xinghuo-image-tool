@@ -1,0 +1,127 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast feedback on PRs: type-check the frontend, cargo-check the Rust side.
+  check:
+    name: Type check + cargo check
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Type check frontend
+        run: npx tsc --noEmit
+
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  # Full release build: NSIS installer + single-file portable exe + zip.
+  build:
+    name: Build installer + portable
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: tauri build (frontend + Rust release + installer)
+        run: npx tauri build
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '0.1.0'
+          try {
+            $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          } catch {
+            Write-Warning "读取版本失败，回退到 $ver"
+          }
+
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          New-Item -ItemType Directory -Force -Path out  | Out-Null
+
+          $nsis = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter '*.exe' -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $nsis) { throw '未找到 NSIS 安装包 (bundle/nsis/*.exe)' }
+          Copy-Item $nsis.FullName "stage/XinghuoImageTool-$ver-x64-setup.exe"
+
+          # Cargo crate is named "app", so the release binary is app.exe.
+          $portable = 'src-tauri/target/release/app.exe'
+          if (-not (Test-Path $portable)) { throw "未找到绿色版 $portable" }
+          Copy-Item $portable "stage/XinghuoImageTool-$ver-portable-x64.exe"
+
+          Compress-Archive -Path 'stage/*' -DestinationPath "out/XinghuoImageTool-$ver-portable-x64.zip" -Force
+
+          Get-ChildItem -Recurse stage, out | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: XinghuoImageTool-windows-x64
+          path: |
+            stage/*
+            out/*
+          if-no-files-found: error
+
+      # Only on tag pushes (v*): attach the two binaries to a GitHub Release.
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            stage/*
+            out/*

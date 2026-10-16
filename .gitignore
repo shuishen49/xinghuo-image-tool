@@ -28,3 +28,6 @@ dist-ssr
 
 # build artifacts
 /dist-portable/
+
+# WorkBuddy project data (NOT a cache — do not delete)
+/.workbuddy/

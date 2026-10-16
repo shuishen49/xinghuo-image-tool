@@ -344,6 +344,21 @@ button:disabled {
   background: var(--err);
 }
 
+/* video frame capture */
+.video-frame-name { font-size: 12px; color: var(--muted); }
+.video-frame-stage {
+  position: relative; min-height: 280px; max-height: 62vh; display: flex;
+  align-items: center; justify-content: center; background: #050608;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.video-frame-stage video { display: block; max-width: 100%; max-height: 62vh; width: auto; height: auto; }
+.video-frame-empty { position: absolute; color: var(--muted); pointer-events: none; }
+.video-frame-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.video-frame-controls > span { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); white-space: nowrap; }
+#video-frame-seek { flex: 1; min-width: 180px; accent-color: var(--accent); padding: 0; }
+.frame-step { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+.frame-step input { width: 74px; padding: 6px 8px; }
+
 .card-actions {
   display: flex;
   gap: 6px;

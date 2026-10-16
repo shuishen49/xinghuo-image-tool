@@ -8,9 +8,17 @@ interface ImageOut {
   saved_path: string;
   source_url: string | null;
 }
+type AuthMode = "apikey" | "password";
 interface Settings {
   baseUrl: string;
+  /// How we authenticate: "apikey" (Bearer + API Key) or "password" (session
+  /// JWT obtained from a username/password login).
+  authMode: AuthMode;
   apiKey: string;
+  loginUser: string;
+  loginToken: string;
+  /// Unix seconds when `loginToken` expires; 0 = unknown (server didn't tell us).
+  loginExp: number;
   model: string;
   size: string;
   timeoutSec: number;
@@ -51,6 +59,11 @@ interface Task {
   timeLabel: string;
 }
 
+// ---------- feature flags ----------
+// 「漫剧工作台」目前不随正式版开放：置为 false 会隐藏入口标签，但代码、
+// 内嵌网关与设置项全部保留，改回 true 重新构建即可恢复。
+const SHOW_DRAMA = false;
+
 // ---------- catalog (fixed by the API spec) ----------
 const MODELS = [
   { value: "gpt-5-3", label: "GPT-Image（标准）" },
@@ -58,14 +71,18 @@ const MODELS = [
 ];
 const SIZES = [
   { value: "1024x1024", label: "1024 × 1024（方形）" },
-  { value: "1536x864", label: "1536 × 864（横版）" },
-  { value: "864x1536", label: "864 × 1536（竖版）" },
+  { value: "1920x1080", label: "1920 × 1080（横版）" },
+  { value: "1080x1920", label: "1080 × 1920（竖版）" },
 ];
+const AUTO_SIZE = "__auto__";
+const INVALID_SIZE = "__invalid__";
 const SIZE_PATTERN = /^[0-9]{2,5}x[0-9]{2,5}$/;
 
 // ---------- settings persistence ----------
-const STORE_KEY = "xinghuo_settings";
-const TASKS_KEY = "xinghuo_tasks";
+const STORE_KEY = "linggan10s_settings";
+const TASKS_KEY = "linggan10s_tasks";
+const LEGACY_STORE_KEYS = ["xinghuo_settings"];
+const LEGACY_TASKS_KEYS = ["xinghuo_tasks"];
 const DEFAULT_BASE = "https://uuerqapsftez.sealosgzg.site";
 // Empty = use the platform's own OSS endpoint ({base}/api/v1/uploads/upload).
 const DEFAULT_UPLOAD = "";
@@ -79,7 +96,11 @@ const DEFAULT_DASHSCOPE_TTS = "qwen3-tts-vd-realtime-2026-01-15";
 function loadSettings(): Settings {
   const d: Settings = {
     baseUrl: DEFAULT_BASE,
+    authMode: "apikey",
     apiKey: "",
+    loginUser: "",
+    loginToken: "",
+    loginExp: 0,
     model: MODELS[0].value,
     size: SIZES[0].value,
     timeoutSec: 600,
@@ -99,12 +120,18 @@ function loadSettings(): Settings {
     ffmpegPath: "",
   };
   try {
-    const raw = localStorage.getItem(STORE_KEY);
+    const raw =
+      localStorage.getItem(STORE_KEY) ??
+      LEGACY_STORE_KEYS.map((k) => localStorage.getItem(k)).find((v): v is string => !!v);
     if (raw) {
       const s = JSON.parse(raw) as Partial<Settings>;
       const loaded: Settings = {
         baseUrl: s.baseUrl ?? d.baseUrl,
+        authMode: s.authMode === "password" ? "password" : "apikey",
         apiKey: s.apiKey ?? d.apiKey,
+        loginUser: s.loginUser ?? d.loginUser,
+        loginToken: s.loginToken ?? d.loginToken,
+        loginExp: typeof s.loginExp === "number" ? s.loginExp : d.loginExp,
         model: s.model ?? d.model,
         size: s.size ?? d.size,
         timeoutSec: s.timeoutSec ?? d.timeoutSec,
@@ -162,23 +189,25 @@ function modelOptions(selected: string): string {
   ).join("");
 }
 function sizeOptions(selected: string): string {
-  const known = SIZES.some((s) => s.value === selected);
+  const known = selected === AUTO_SIZE || SIZES.some((s) => s.value === selected);
+  const auto = `<option value="${AUTO_SIZE}" ${selected === AUTO_SIZE ? "selected" : ""}>自动（不指定尺寸）</option>`;
   const std = SIZES.map(
     (s) =>
       `<option value="${s.value}" ${s.value === selected ? "selected" : ""}>${s.label}</option>`,
   ).join("");
-  return `${std}<option value="__custom__" ${!known ? "selected" : ""}>自定义…</option>`;
+  return `${auto}${std}<option value="__custom__" ${!known ? "selected" : ""}>自定义…</option>`;
 }
 
 // ---------- markup ----------
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <header class="topbar">
-    <div class="brand">🎨 星火图片工具</div>
+    <div class="brand">🎨 灵感10s</div>
     <nav class="tabs">
       <button class="tab" data-tab="t2i">文生图</button>
       <button class="tab" data-tab="i2i">图生图</button>
+      <button class="tab" data-tab="video-frames">视频截帧</button>
       <button class="tab" data-tab="tasks">任务<span id="task-badge" class="tab-badge hidden"></span></button>
-      <button class="tab" data-tab="drama">漫剧工作台</button>
+      <button class="tab${SHOW_DRAMA ? "" : " hidden"}" data-tab="drama">漫剧工作台</button>
       <button class="tab" data-tab="settings">设置</button>
     </nav>
   </header>
@@ -248,6 +277,32 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div class="status" id="i2i-status"></div>
     </section>
 
+    <!-- 视频按帧预览与截图 -->
+    <section class="panel hidden" id="panel-video-frames">
+      <div class="field">
+        <span>上传 MP4 视频</span>
+        <label class="filebtn">选择视频文件<input id="video-frame-file" type="file" accept="video/mp4,video/*" hidden /></label>
+        <span id="video-frame-name" class="video-frame-name">尚未选择视频</span>
+      </div>
+      <div class="video-frame-stage">
+        <video id="video-frame-player" controls playsinline preload="metadata"></video>
+        <div id="video-frame-empty" class="video-frame-empty">选择视频后即可预览</div>
+      </div>
+      <div class="video-frame-controls">
+        <span id="video-frame-time">00:00.000 / 00:00.000</span>
+        <input id="video-frame-seek" type="range" min="0" max="0" step="0.001" value="0" disabled />
+        <button id="video-frame-prev" class="mini" disabled>上一帧</button>
+        <button id="video-frame-next" class="mini" disabled>下一帧</button>
+        <label class="frame-step">步长 <input id="video-frame-step" type="number" min="0.001" step="0.001" value="0.033" /> 秒</label>
+      </div>
+      <div class="row">
+        <button id="video-frame-copy" class="primary" disabled>📋 复制当前帧到剪贴板</button>
+        <button id="video-frame-download" disabled>⬇ 下载当前帧 PNG</button>
+      </div>
+      <div id="video-frame-status" class="status"></div>
+      <p class="hint">使用滑块或左右按钮定位画面。截图会按当前视频分辨率生成 PNG，可直接复制到剪贴板或保存到本地。</p>
+    </section>
+
     <!-- 任务 -->
     <section class="panel hidden" id="panel-tasks">
       <div class="tasks-bar">
@@ -268,10 +323,41 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <span>请求地址 (Base URL)</span>
         <input id="set-base" type="text" placeholder="${DEFAULT_BASE}" />
       </label>
-      <label class="field">
-        <span>API Key（Bearer Token）</span>
-        <input id="set-key" type="password" placeholder="sk-..." />
-      </label>
+      <div class="field">
+        <span>登录方式</span>
+        <div class="row" style="gap:8px;">
+          <button class="mini" id="auth-mode-apikey" type="button">① API Key</button>
+          <button class="mini" id="auth-mode-password" type="button">② 用户名 + 密码</button>
+        </div>
+      </div>
+
+      <div id="wrap-apikey">
+        <label class="field">
+          <span>API Key（Bearer Token）</span>
+          <input id="set-key" type="password" placeholder="sk-..." />
+        </label>
+        <p class="hint">在网站 <code>/profile</code> 的「API Key 管理」创建，会以 <code>Authorization: Bearer</code> 发送。</p>
+      </div>
+
+      <div id="wrap-password" class="hidden">
+        <label class="field">
+          <span>用户名</span>
+          <input id="set-username" type="text" autocomplete="username" placeholder="网站登录用户名" />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="set-password" type="password" autocomplete="current-password" placeholder="网站登录密码" />
+        </label>
+        <div class="row" style="gap:8px;align-items:center;">
+          <button class="primary" id="btn-login" type="button">登录</button>
+          <button class="mini" id="btn-logout" type="button">退出登录</button>
+          <span id="login-state" style="font-size:13px;color:var(--muted);"></span>
+        </div>
+        <p class="hint">
+          登录后只会用你的账号密码向「接口地址」换一个短期 Token，Token 保存在本机、随生图请求发出；<b>密码不会保存，也不会发给任何第三方</b>。<br />
+          Token 过期后重新点一次「登录」即可。
+        </p>
+      </div>
       <label class="field">
         <span>图片上传地址 (Upload URL，留空＝用平台自带 OSS，推荐)</span>
         <input id="set-upload" type="text" placeholder="留空即用平台 OSS：{接口地址}/api/v1/uploads/upload?public=true" />
@@ -364,7 +450,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       </div>
       <div class="status" id="set-status"></div>
       <p class="hint">
-        生成的图片会自动保存到「图片 / Pictures」目录下的 <code>xinghuo-image-tool</code> 文件夹。设置仅保存在本机。<br />
+        生成的图片会自动保存到「图片 / Pictures」目录下的 <code>linggan10s-image-tool</code> 文件夹。设置仅保存在本机。<br />
         模型：<code>gpt-5-3</code> = GPT-Image（标准）；<code>gpt-5-4-thinking</code> = GPT-Image2（仅 Plus 账户可用）。<br />
         点「生成」会把任务加入队列并立刻返回，可连续提交；同时进行的数量由「最大同时任务数」控制，多出的会排队。<br />
         漫剧工作台的所有 Key <b>留在 Rust 端</b>，工作台页面拿不到。
@@ -489,9 +575,32 @@ function buildImageCard(out: ImageOut): HTMLDivElement {
   return card;
 }
 
+/** True when the saved login token is still valid (unknown expiry counts as OK). */
+function loginValid(): boolean {
+  if (settings.authMode !== "password") return false;
+  if (!settings.loginToken) return false;
+  return !settings.loginExp || settings.loginExp * 1000 > Date.now();
+}
+
 function ensureConfigured(statusId: string): boolean {
-  if (!settings.baseUrl || !settings.apiKey) {
-    setStatus(statusId, "请先在「设置」里填写 Base URL 和 API Key。", "error");
+  if (!settings.baseUrl) {
+    setStatus(statusId, "请先在「设置」里填写 Base URL。", "error");
+    switchTab("settings");
+    return false;
+  }
+  if (settings.authMode === "password") {
+    if (!settings.loginToken) {
+      setStatus(statusId, "请先在「设置」里用用户名和密码登录。", "error");
+      switchTab("settings");
+      return false;
+    }
+    if (!loginValid()) {
+      setStatus(statusId, "登录已过期，请到「设置」重新登录。", "error");
+      switchTab("settings");
+      return false;
+    }
+  } else if (!settings.apiKey) {
+    setStatus(statusId, "请先在「设置」里填写 API Key。", "error");
     switchTab("settings");
     return false;
   }
@@ -512,17 +621,38 @@ function wireSize(prefix: string): () => string | null {
   sel.addEventListener("change", sync);
   sync();
   return () => {
+    if (sel.value === AUTO_SIZE) return null;
     if (sel.value !== "__custom__") return sel.value;
     const v = custom.value.trim();
-    if (!SIZE_PATTERN.test(v)) return null;
+    if (!SIZE_PATTERN.test(v)) return INVALID_SIZE;
     return v;
   };
+}
+
+function appendSizeToPrompt(prompt: string, size: string | null): string {
+  if (!size) return prompt;
+  const [w, h] = size.split("x").map((x) => Number(x));
+  const orientation = Number.isFinite(w) && Number.isFinite(h)
+    ? w === h
+      ? "square"
+      : w > h
+        ? "landscape"
+        : "portrait"
+    : "";
+  const rule = [
+    `Mandatory output canvas: ${size}.`,
+    orientation ? `Use a ${orientation} composition exactly matching ${size}.` : "",
+    "Do not generate any other aspect ratio. Do not crop to square. Even if the API size parameter is ignored, follow this canvas size/aspect ratio from the prompt.",
+  ].filter(Boolean).join(" ");
+  return `${prompt}\n\n${rule}`;
 }
 
 // ---------- tabs ----------
 let dramaLoaded = false;
 
 function switchTab(name: string): void {
+  // Never land on a hidden tab (e.g. the drama workspace in the official build).
+  if (name === "drama" && !SHOW_DRAMA) name = "t2i";
   for (const t of document.querySelectorAll<HTMLButtonElement>(".tab")) {
     t.classList.toggle("active", t.dataset.tab === name);
   }
@@ -540,7 +670,10 @@ for (const t of document.querySelectorAll<HTMLButtonElement>(".tab")) {
 switchTab("t2i");
 
 // ---------- gateway / drama workspace ----------
+// Hidden in the official build (see SHOW_DRAMA), but kept intact so flipping
+// the flag back is all it takes to bring it back.
 async function loadDramaIframe() {
+  if (!SHOW_DRAMA) return;
   try {
     const url: string = await invoke("gateway_url");
     const iframe = byId<HTMLIFrameElement>("drama-iframe");
@@ -654,9 +787,11 @@ function renderTasks(): void {
 }
 
 function buildReq(t: Task) {
+  const useToken = settings.authMode === "password";
   return {
     baseUrl: settings.baseUrl,
-    apiKey: settings.apiKey,
+    apiKey: useToken ? "" : settings.apiKey,
+    token: useToken ? settings.loginToken : undefined,
     model: t.model,
     prompt: t.prompt,
     size: t.size ?? undefined,
@@ -771,7 +906,9 @@ function saveTasks(): void {
 }
 function loadTasks(): void {
   try {
-    const raw = localStorage.getItem(TASKS_KEY);
+    const raw =
+      localStorage.getItem(TASKS_KEY) ??
+      LEGACY_TASKS_KEYS.map((k) => localStorage.getItem(k)).find((v): v is string => !!v);
     if (!raw) return;
     const data = JSON.parse(raw) as { seq?: number; tasks?: Task[] };
     if (!Array.isArray(data.tasks)) return;
@@ -785,6 +922,7 @@ function loadTasks(): void {
       typeof data.seq === "number"
         ? data.seq
         : tasks.reduce((m, t) => Math.max(m, t.id), 0);
+    saveTasks();
   } catch {
     /* ignore corrupt storage */
   }
@@ -813,9 +951,121 @@ const dashscopeKeyInput = byId<HTMLInputElement>("set-dashscope-key");
 const dashscopeDesignInput = byId<HTMLInputElement>("set-dashscope-design");
 const dashscopeTtsInput = byId<HTMLInputElement>("set-dashscope-tts");
 const ffmpegPathInput = byId<HTMLInputElement>("set-ffmpeg-path");
+const usernameInput = byId<HTMLInputElement>("set-username");
+const passwordInput = byId<HTMLInputElement>("set-password");
+const btnLogin = byId<HTMLButtonElement>("btn-login");
+const btnLogout = byId<HTMLButtonElement>("btn-logout");
+const loginState = byId<HTMLSpanElement>("login-state");
+const btnAuthApiKey = byId<HTMLButtonElement>("auth-mode-apikey");
+const btnAuthPassword = byId<HTMLButtonElement>("auth-mode-password");
+
+/**
+ * Show the panel matching the current `authMode` and paint the login state.
+ * Called on boot, on mode switch, and after a successful login.
+ */
+function renderAuthUi(): void {
+  const isPwd = settings.authMode === "password";
+  byId<HTMLDivElement>("wrap-apikey").classList.toggle("hidden", isPwd);
+  byId<HTMLDivElement>("wrap-password").classList.toggle("hidden", !isPwd);
+
+  btnAuthApiKey.classList.toggle("primary", !isPwd);
+  btnAuthApiKey.classList.toggle("mini", isPwd);
+  btnAuthPassword.classList.toggle("primary", isPwd);
+  btnAuthPassword.classList.toggle("mini", !isPwd);
+
+  if (!isPwd) {
+    loginState.textContent = "";
+    return;
+  }
+  if (!settings.loginToken) {
+    loginState.textContent = "未登录";
+    loginState.style.color = "var(--muted)";
+    return;
+  }
+  const expired = !loginValid();
+  const when = settings.loginExp
+    ? new Date(settings.loginExp * 1000).toLocaleString()
+    : "未知";
+  loginState.textContent = expired
+    ? `已登录：${settings.loginUser}（Token 已于 ${when} 过期，请重新登录）`
+    : `已登录：${settings.loginUser}（有效期至 ${when}）`;
+  loginState.style.color = expired ? "var(--err, #f85149)" : "var(--ok, #3fb950)";
+}
+
+/** Switch login mode. Switching away from password keeps the token so the
+ *  user can switch back without logging in again. */
+function setAuthMode(mode: AuthMode): void {
+  settings = { ...settings, authMode: mode };
+  saveSettings(settings);
+  renderAuthUi();
+}
+
+btnAuthApiKey.addEventListener("click", () => setAuthMode("apikey"));
+btnAuthPassword.addEventListener("click", () => setAuthMode("password"));
+
+/** Accept either key spelling — Tauri may camelCase command return values. */
+interface LoginResult {
+  access_token?: string;
+  accessToken?: string;
+  username?: string;
+  expires_at?: number;
+  expiresAt?: number;
+}
+
+btnLogin.addEventListener("click", async () => {
+  const base = baseInput.value.trim() || DEFAULT_BASE;
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value; // 密码不做 trim，末尾空格是合法的
+  if (!username) return setLoginMsg("请输入用户名。", "error");
+  if (!password) return setLoginMsg("请输入密码。", "error");
+
+  btnLogin.disabled = true;
+  setLoginMsg("登录中…", "info");
+  try {
+    const r = await invoke<LoginResult>("platform_login", { base, username, password });
+    const token = r.access_token ?? r.accessToken ?? "";
+    const name = r.username ?? username;
+    if (!token) {
+      setLoginMsg("登录响应里没有 access_token，请重试。", "error");
+      return;
+    }
+    settings = {
+      ...settings,
+      authMode: "password",
+      loginUser: name,
+      loginToken: token,
+      loginExp: r.expires_at ?? r.expiresAt ?? 0,
+    };
+    saveSettings(settings);
+    passwordInput.value = "";
+    await syncGatewayConfig();
+    renderAuthUi();
+    setStatus("set-status", `已登录：${name} ✓`, "ok");
+  } catch (e) {
+    setLoginMsg(`登录失败：${String(e)}`, "error");
+  } finally {
+    btnLogin.disabled = false;
+  }
+});
+
+btnLogout.addEventListener("click", async () => {
+  settings = { ...settings, loginToken: "", loginUser: "", loginExp: 0 };
+  saveSettings(settings);
+  passwordInput.value = "";
+  await syncGatewayConfig();
+  renderAuthUi();
+  setStatus("set-status", "已退出登录 ✓", "ok");
+});
+
+function setLoginMsg(msg: string, kind: "info" | "error" | "ok"): void {
+  loginState.textContent = msg;
+  loginState.style.color =
+    kind === "error" ? "var(--err, #f85149)" : kind === "ok" ? "var(--ok, #3fb950)" : "var(--muted)";
+}
 
 baseInput.value = settings.baseUrl;
 keyInput.value = settings.apiKey;
+usernameInput.value = settings.loginUser;
 timeoutInput.value = String(settings.timeoutSec);
 concurrencyInput.value = String(settings.maxConcurrent);
 tierSelect.value = settings.accountTier;
@@ -831,6 +1081,8 @@ dashscopeKeyInput.value = settings.dashscopeKey;
 dashscopeDesignInput.value = settings.dashscopeDesignModel;
 dashscopeTtsInput.value = settings.dashscopeTtsModel;
 ffmpegPathInput.value = settings.ffmpegPath;
+// Paint the login panel last — it touches the element refs declared above.
+renderAuthUi();
 
 // Push settings to the embedded gateway (image gen + chat upstream keys).
 async function syncGatewayConfig() {
@@ -839,6 +1091,7 @@ async function syncGatewayConfig() {
       cfg: {
         imgBase: settings.baseUrl || DEFAULT_BASE,
         imgKey: settings.apiKey,
+        imgToken: settings.loginToken,
         imgModel: settings.model,
         imgUploadUrl: settings.uploadUrl || "",
         imgTimeout: settings.timeoutSec,
@@ -885,7 +1138,13 @@ byId<HTMLButtonElement>("btn-save").addEventListener("click", async () => {
   settings = {
     ...settings,
     baseUrl: baseInput.value.trim() || DEFAULT_BASE,
+    // Keep the current mode; the ①/② buttons are what switch it.
+    authMode: settings.authMode,
     apiKey: keyInput.value.trim(),
+    loginUser: usernameInput.value.trim(),
+    // Token / expiry are only changed by login & logout.
+    loginToken: settings.loginToken,
+    loginExp: settings.loginExp,
     timeoutSec: Number.isFinite(t) ? Math.min(1800, Math.max(10, t)) : 600,
     maxConcurrent: Number.isFinite(c) ? Math.min(16, Math.max(1, c)) : 3,
     accountTier: tierSelect.value,
@@ -917,12 +1176,13 @@ byId<HTMLButtonElement>("t2i-go").addEventListener("click", () => {
   if (!prompt) return setStatus("t2i-status", "请输入提示词。", "error");
   if (!ensureConfigured("t2i-status")) return;
   const size = t2iSize();
-  if (size === null) return setStatus("t2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
+  if (size === INVALID_SIZE) return setStatus("t2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
   const model = byId<HTMLSelectElement>("t2i-model").value;
   settings = { ...settings, model, size: size ?? settings.size };
   saveSettings(settings);
   const count = readCount("t2i-count");
-  for (let i = 0; i < count; i++) enqueue("t2i", model, size, prompt, []);
+  const finalPrompt = appendSizeToPrompt(prompt, size);
+  for (let i = 0; i < count; i++) enqueue("t2i", model, size, finalPrompt, []);
   setStatus("t2i-status", submittedNote(count), "ok");
 });
 
@@ -1051,12 +1311,102 @@ byId<HTMLButtonElement>("i2i-go").addEventListener("click", () => {
   if (!prompt) return setStatus("i2i-status", "请输入提示词。", "error");
   if (!ensureConfigured("i2i-status")) return;
   const size = i2iSize();
-  if (size === null) return setStatus("i2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
+  if (size === INVALID_SIZE) return setStatus("i2i-status", "自定义尺寸格式不对，应为「宽x高」，如 1024x1024。", "error");
   const model = byId<HTMLSelectElement>("i2i-model").value;
   settings = { ...settings, model, size: size ?? settings.size };
   saveSettings(settings);
   const count = readCount("i2i-count");
   const refs = refImgs.map((r) => r.value);
-  for (let i = 0; i < count; i++) enqueue("i2i", model, size, prompt, refs);
+  const finalPrompt = appendSizeToPrompt(prompt, size);
+  for (let i = 0; i < count; i++) enqueue("i2i", model, size, finalPrompt, refs);
   setStatus("i2i-status", submittedNote(count), "ok");
+});
+
+// ---------- 视频按帧预览 / 截图 ----------
+const videoFileInput = byId<HTMLInputElement>("video-frame-file");
+const videoPlayer = byId<HTMLVideoElement>("video-frame-player");
+const videoSeek = byId<HTMLInputElement>("video-frame-seek");
+const videoTime = byId<HTMLSpanElement>("video-frame-time");
+const videoName = byId<HTMLSpanElement>("video-frame-name");
+const videoEmpty = byId<HTMLDivElement>("video-frame-empty");
+const videoPrev = byId<HTMLButtonElement>("video-frame-prev");
+const videoNext = byId<HTMLButtonElement>("video-frame-next");
+const videoCopy = byId<HTMLButtonElement>("video-frame-copy");
+const videoDownload = byId<HTMLButtonElement>("video-frame-download");
+const videoStep = byId<HTMLInputElement>("video-frame-step");
+let videoObjectUrl = "";
+
+function formatVideoTime(sec: number): string {
+  if (!Number.isFinite(sec)) return "00:00.000";
+  const mins = Math.floor(sec / 60);
+  const seconds = sec - mins * 60;
+  return `${String(mins).padStart(2, "0")}:${seconds.toFixed(3).padStart(6, "0")}`;
+}
+function updateVideoFrameUi(): void {
+  const duration = Number.isFinite(videoPlayer.duration) ? videoPlayer.duration : 0;
+  videoSeek.max = String(duration);
+  videoSeek.value = String(videoPlayer.currentTime || 0);
+  videoTime.textContent = `${formatVideoTime(videoPlayer.currentTime)} / ${formatVideoTime(duration)}`;
+  const enabled = !!videoObjectUrl && duration > 0;
+  videoSeek.disabled = !enabled;
+  videoPrev.disabled = !enabled;
+  videoNext.disabled = !enabled;
+  videoCopy.disabled = !enabled;
+  videoDownload.disabled = !enabled;
+}
+function seekVideo(delta: number): void {
+  if (!videoObjectUrl) return;
+  const step = Math.max(0.001, Number(videoStep.value) || 0.033);
+  videoPlayer.currentTime = Math.max(0, Math.min(videoPlayer.duration || 0, videoPlayer.currentTime + delta * step));
+}
+function frameBlob(): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    if (!videoPlayer.videoWidth || !videoPlayer.videoHeight) return reject(new Error("视频画面尚未加载完成"));
+    const canvas = document.createElement("canvas");
+    canvas.width = videoPlayer.videoWidth;
+    canvas.height = videoPlayer.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return reject(new Error("无法创建画布"));
+    ctx.drawImage(videoPlayer, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("截图生成失败")), "image/png");
+  });
+}
+function frameFilename(): string {
+  const base = (videoName.textContent || "video").replace(/\.[^.]+$/, "").replace(/[^\w\-\u4e00-\u9fff]+/g, "_");
+  return `${base || "video"}-frame-${Math.round(videoPlayer.currentTime * 1000)}ms.png`;
+}
+videoFileInput.addEventListener("change", () => {
+  const file = videoFileInput.files?.[0];
+  if (!file) return;
+  if (videoObjectUrl) URL.revokeObjectURL(videoObjectUrl);
+  videoObjectUrl = URL.createObjectURL(file);
+  videoPlayer.src = videoObjectUrl;
+  videoPlayer.load();
+  videoName.textContent = file.name;
+  videoEmpty.classList.add("hidden");
+  setStatus("video-frame-status", "视频已加载，正在读取时长…", "info");
+  videoFileInput.value = "";
+});
+videoPlayer.addEventListener("loadedmetadata", () => { updateVideoFrameUi(); setStatus("video-frame-status", "可以按帧预览并截图。", "ok"); });
+videoPlayer.addEventListener("timeupdate", updateVideoFrameUi);
+videoSeek.addEventListener("input", () => { videoPlayer.currentTime = Number(videoSeek.value); updateVideoFrameUi(); });
+videoPrev.addEventListener("click", () => seekVideo(-1));
+videoNext.addEventListener("click", () => seekVideo(1));
+videoCopy.addEventListener("click", async () => {
+  try {
+    const blob = await frameBlob();
+    const ClipboardItemCtor = (window as any).ClipboardItem;
+    if (!navigator.clipboard?.write || !ClipboardItemCtor) throw new Error("当前环境不支持图片剪贴板");
+    await navigator.clipboard.write([new ClipboardItemCtor({ "image/png": blob })]);
+    setStatus("video-frame-status", "当前帧已复制到剪贴板 ✓", "ok");
+  } catch (e) { setStatus("video-frame-status", `复制失败：${e instanceof Error ? e.message : String(e)}`, "error"); }
+});
+videoDownload.addEventListener("click", async () => {
+  try {
+    const blob = await frameBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = frameFilename(); a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus("video-frame-status", "截图已下载 ✓", "ok");
+  } catch (e) { setStatus("video-frame-status", `下载失败：${e instanceof Error ? e.message : String(e)}`, "error"); }
 });

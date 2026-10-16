@@ -1,4 +1,4 @@
-# 星火图片工具 (Xinghuo Image Tool)
+# 灵感10s (Linggan10s Image Tool)
 
 一个基于 [Tauri 2](https://v2.tauri.app/) 的 Windows 桌面工具，调用 OpenAI 兼容的图片接口做**文生图 / 图生图**，结果自动保存到本地。
 
@@ -21,15 +21,16 @@
 
 ## 功能
 
+- **两种登录方式**：`API Key`（Bearer）或 `用户名 + 密码`（换取短期 Token），可随时切换。
 - **文生图**：输入提示词生成图片。
 - **图生图**：添加参考图（文件 / 粘贴剪贴板 / 图片链接），按提示词改图、翻译图中文字等。
 - **出图张数**：一次点击可生成 1~4 张（每张是一个独立任务，自动排队 / 并发）。
 - **任务队列**：连续提交多个任务，并发数可调，实时显示「生成中 / 排队 / 完成 / 失败」。
-- **自动保存**：生成的图片保存到 `图片(Pictures)/xinghuo-image-tool/`。
+- **自动保存**：生成的图片保存到 `图片(Pictures)/linggan10s-image-tool/`。
 - **本地参考图自动上传**：本地 / 剪贴板图片会先上传到平台自带 OSS（`/api/v1/uploads/upload?public=true`）换成公网地址，供下游服务读取。
 - **任务持久化**：任务列表与结果在重启后仍在（只存路径不存 base64，重新打开时从磁盘读回预览）。
 - **图片放大**：点任意结果图 / 参考图可全屏放大查看。
-- **🎬 漫剧工作台**：内嵌一个本地工作台（分镜 / 剧本助手 / 角色库），由应用自带的 Rust 网关提供服务，无需外部依赖。详见下方说明。
+- **🎬 漫剧工作台**（正式版默认隐藏）：内嵌一个本地工作台（分镜 / 剧本助手 / 角色库），由应用自带的 Rust 网关提供服务，无需外部依赖。详见下方说明。
 
 ---
 
@@ -40,7 +41,8 @@
 | 项 | 说明 |
 |---|---|
 | 接口地址 (Base URL) | OpenAI 兼容服务地址，例如 `https://uuerqapsftez.sealosgzg.site` |
-| API Key | 形如 `sk_xxx`，用 `Authorization: Bearer` 发送 |
+| 登录方式 | ① `API Key`：形如 `sk_xxx`，用 `Authorization: Bearer` 发送；② `用户名 + 密码`：登录换取短期 Token，用 `token` 头发送 |
+| 用户名 / 密码 | 选②时填写，就是网站登录账号。**只用于换 Token，密码不保存、不外发** |
 | 等待超时（秒） | 单个请求最长等待，默认 600（10 分钟），图片生成较慢，建议别调太小 |
 | 最大同时任务数 | 并发数，默认 3 |
 | 图片上传地址 | **留空即用平台自带 OSS（推荐）**；填了才用自定义第三方图床 |
@@ -50,6 +52,19 @@
 
 - `gpt-5-3` — GPT-Image（标准）
 - `gpt-5-4-thinking` — GPT-Image2（Plus 专属）
+
+### 登录方式
+
+后端同时接受两种互斥凭证（`HybridAuthControl`）：
+
+| 方式 | 请求头 | 来源 |
+|---|---|---|
+| API Key | `Authorization: Bearer sk_xxx` | 网站 `/profile` → 「API Key 管理」创建 |
+| 用户名 + 密码 | `token: <JWT>` | `POST {base}/api/v1/base/access_token` 换取 |
+
+两者都不要混发：`token` 头优先级更高，客户端每次只发一种。Token 会过期，过期后重新点一次「登录」即可；生图请求发出后断线**不会**自动重发，避免重复扣费。
+
+用「用户名 + 密码」时，密码只发给你自己填的「接口地址」，不会写进任何本地文件或日志，也不会发给第三方图床（第三方图床是匿名上传，本来就不带凭证）。
 
 填好后到「文生图 / 图生图」输入提示词，选「出图张数」，点 **生成**，到「任务」页查看结果。
 
@@ -83,10 +98,10 @@ npx tauri build
 
 产物位置（`src-tauri/target/release/`）：
 
-- **安装版 exe**：`bundle/nsis/XinghuoImageTool_<版本>_x64-setup.exe`
+- **安装版 exe**：`bundle/nsis/Linggan10sImageTool_<版本>_x64-setup.exe`
   双击安装，进开始菜单 / 桌面。
-- **绿色免安装版**：`XinghuoImageTool.exe`（单文件，可直接运行）
-  `package.bat` 会把它压缩成 `dist-portable/XinghuoImageTool-<版本>-portable-x64.zip`，解压即用、无需安装。
+- **绿色免安装版**：`Linggan10sImageTool.exe`（单文件，可直接运行）
+  `package.bat` 会把它压缩成 `dist-portable/Linggan10sImageTool-<版本>-portable-x64.zip`，解压即用、无需安装。
 
 > 绿色版依赖系统的 **WebView2 运行时**（Windows 10/11 默认已装；老系统需先装一次 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)）。
 
@@ -104,7 +119,7 @@ npx tauri build
   - `GET  /api/projects` — 列出本地项目。
   - `POST /v1/chat/completions` — 转发到独立的聊天上游（剧本助手）。
 - **凭据隔离**：图片 / 聊天接口的 Key 通过 `configure_gateway` 命令从设置推到 Rust 端共享状态，工作台 iframe 页面本身不持有任何 Key。
-- 工作台的项目数据 / 生成图保存在 `图片(Pictures)/xinghuo-image-tool/projects/`。
+- 工作台的项目数据 / 生成图保存在 `图片(Pictures)/linggan10s-image-tool/projects/`。
 
 > 视频生成 / 配音（`/api/video/*`、`/api/dubbing/*`）尚未在网关实现，属后续功能。
 
