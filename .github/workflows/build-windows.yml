@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 打包后发布到 GitHub Release（会自动创建 v<版本> 标签）
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -98,6 +103,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect artifacts
+        id: collect
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -107,6 +113,8 @@ jobs:
           } catch {
             Write-Warning "读取版本失败，回退到 $ver"
           }
+          "ver=$ver" >> $env:GITHUB_OUTPUT
+          Write-Host "版本：$ver"
 
           New-Item -ItemType Directory -Force -Path stage | Out-Null
           New-Item -ItemType Directory -Force -Path out  | Out-Null
@@ -134,11 +142,32 @@ jobs:
             out/*
           if-no-files-found: error
 
-      # Only on tag pushes (v*): attach the two binaries to a GitHub Release.
+      # 手动触发 + 勾选 publish 时，先补一个 v<版本> 标签（Release 必须挂在标签上）。
+      - name: Ensure release tag exists
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag="v${{ steps.collect.outputs.ver }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "标签 $tag 已存在，跳过创建"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+            echo "已创建并推送 $tag"
+          fi
+
+      # 打 tag 推送时自动发布；也可在 Actions 页面手动触发并勾选 publish。
       - name: Publish to Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.collect.outputs.ver) }}"
+          name: "v${{ steps.collect.outputs.ver }}"
+          generate_release_notes: true
+          draft: false
           files: |
             stage/*
             out/*

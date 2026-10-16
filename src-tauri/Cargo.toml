@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.1.1"
 description = "灵感10s — 文生图 / 图生图 桌面客户端"
 authors = ["you"]
 license = ""
