@@ -65,6 +65,9 @@ jobs:
       # Signing key for updater artifacts (.sig). Store the PRIVATE key as a
       # GitHub Actions secret; the matching public key lives in tauri.conf.json.
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      # 私钥是 rsign 加密格式（密码为空）。CI 里不显式给密码，签名阶段可能
+      # 一直等 tty 读密码把构建挂住（本机 signer sign 已踩过这个坑）。
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
       # Optional: when all of these are set, the built installer + manifest
       # are pushed straight to the website's static download directory.
       UPDATE_SSH_HOST: ${{ secrets.UPDATE_SSH_HOST }}
@@ -172,9 +175,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ver = '${{ steps.collect.outputs.ver }}'
-          $sig = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Filter '*.sig' -Recurse -ErrorAction SilentlyContinue |
-                 Select-Object -First 1
+          # targets=all 时 MSI 也会产出 .sig，必须优先取 NSIS setup 的那一个，
+          # 否则 latest.json 里的签名会和实际下载的安装包对不上。
+          $sig = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Filter '*.sig' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -like '*setup*.exe.sig' } | Select-Object -First 1
+          if (-not $sig) {
+            $sig = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Filter '*.sig' -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          }
           if (-not $sig) { throw '未找到 .sig 签名文件：请确认 TAURI_SIGNING_PRIVATE_KEY 已配置，且 tauri build 生成了 updater 产物' }
+          Write-Host "使用签名: $($sig.FullName)"
+          Copy-Item $sig.FullName "stage/XinghuoImageTool-$ver-x64-setup.exe.sig" -Force
           $signature = (Get-Content $sig.FullName -Raw).Trim()
           $manifest = [ordered]@{
             version   = "v$ver"
@@ -261,7 +272,12 @@ jobs:
           printf '%s\n' "$UPDATE_SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
           ssh-keyscan -p "$port" -H "$UPDATE_SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          # 只传更新链路需要的三个文件。stage/*.exe 会把 portable 绿色版
+          # 一起推到更新目录，既多余又容易让人工排查时搞混该验签哪个包。
+          ver='${{ steps.collect.outputs.ver }}'
           scp -i "$HOME/.ssh/deploy_key" -P "$port" -o StrictHostKeyChecking=yes \
-            stage/*.exe stage/latest.json \
+            "stage/XinghuoImageTool-$ver-x64-setup.exe" \
+            "stage/XinghuoImageTool-$ver-x64-setup.exe.sig" \
+            "stage/latest.json" \
             "$UPDATE_SSH_USER@$UPDATE_SSH_HOST:$UPDATE_REMOTE_DIR/"
-          echo "已上传安装包与 latest.json 到 $UPDATE_REMOTE_DIR"
+          echo "已上传 setup.exe / .sig / latest.json 到 $UPDATE_REMOTE_DIR"
