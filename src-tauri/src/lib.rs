@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+pub mod diag;
 mod gateway;
 
 /// Monotonic counter so concurrent tasks never collide on a filename.
@@ -257,7 +258,11 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 
 /// Resolve an image source returned by the API or supplied as a reference.
 /// May be an http(s) URL, a `data:` URI, or (defensively) raw base64.
-async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
+async fn resolve_src(
+    c: &reqwest::Client,
+    src: &str,
+    task: &str,
+) -> Result<(Vec<u8>, String), String> {
     let src = src.trim();
     if let Some((bytes, mime)) = gateway::embedded_asset_bytes(src) {
         return Ok((bytes, mime));
@@ -273,7 +278,7 @@ async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String)
         return Ok((bytes, mime_for_path(src).to_string()));
     }
     if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
-        src_to_bytes(c, src).await
+        src_to_bytes(c, src, task).await
     } else if looks_like_base64(src) {
         let bytes = B64
             .decode(src.trim())
@@ -284,8 +289,196 @@ async fn resolve_src(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String)
     }
 }
 
+/// A downloaded result image is an idempotent GET: retrying it costs nothing
+/// and never double-charges the user (unlike the generation POST, which must
+/// stay at exactly one attempt). Result URLs from object storage are also
+/// short-lived, so the whole retry budget has to fit inside that window.
+const DL_ATTEMPTS: u32 = 3;
+const DL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `e.to_string()` alone drops the cause (DNS / refused / TLS / read timeout).
+/// A field report without the chain cannot tell "user's network" from
+/// "server deleted the object", so expand every source.
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(&format!(" | ↳ {s}"));
+        src = s.source();
+    }
+    out
+}
+
+/// 403/404 on a time-limited object URL will never fix itself; retrying only
+/// burns the window. 408/429/5xx are worth another shot.
+fn retryable_status(s: reqwest::StatusCode) -> bool {
+    s.as_u16() == 408 || s.as_u16() == 429 || s.is_server_error()
+}
+
+async fn download_bytes(
+    c: &reqwest::Client,
+    url: &str,
+    task: &str,
+) -> Result<(Vec<u8>, String), String> {
+    let safe = diag::safe_url(url);
+    // Some upstream responses wrap or pad the URL. Record it explicitly:
+    // a space in the path completely changes how this failure is diagnosed.
+    let has_space = url.chars().any(|ch| ch.is_whitespace());
+    let mut last_err = String::new();
+
+    for attempt in 1..=DL_ATTEMPTS {
+        let started = std::time::Instant::now();
+        diag::log(
+            "INFO",
+            "dl",
+            task,
+            "download_start",
+            &format!(
+                "attempt={}/{} url={} url_len={} url_has_space={} timeout_s={}",
+                attempt,
+                DL_ATTEMPTS,
+                safe,
+                url.len(),
+                has_space,
+                DL_TIMEOUT.as_secs()
+            ),
+        );
+
+        let outcome: Result<(reqwest::StatusCode, String, Vec<u8>), reqwest::Error> = async {
+            // Override the generation client's timeout (up to 11 min) for
+            // this one request; a stalled download must not hang the task.
+            let resp = c.get(url).timeout(DL_TIMEOUT).send().await?;
+            let status = resp.status();
+            let ct = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let bytes = resp.bytes().await?.to_vec();
+            Ok((status, ct, bytes))
+        }
+        .await;
+        let elapsed = started.elapsed().as_secs_f64();
+
+        match outcome {
+            Err(e) => {
+                last_err = error_chain(&e);
+                diag::log(
+                    "WARN",
+                    "dl",
+                    task,
+                    "download_error",
+                    &format!("attempt={attempt} elapsed={elapsed:.2}s err={last_err}"),
+                );
+                // A malformed URL (e.g. a wrapped path) fails before any
+                // packet is sent; retrying it three times buys nothing.
+                if e.is_builder() {
+                    break;
+                }
+            }
+            Ok((status, ct, bytes)) => {
+                let ct_label = if ct.is_empty() { "-" } else { ct.as_str() };
+                if !status.is_success() {
+                    let body = diag::snippet(&bytes, 200);
+                    last_err = format!(
+                        "HTTP {} · content-type={} · body={}",
+                        status.as_u16(),
+                        ct_label,
+                        if body.is_empty() { "-" } else { body.as_str() }
+                    );
+                    diag::log(
+                        "WARN",
+                        "dl",
+                        task,
+                        "download_http_error",
+                        &format!(
+                            "attempt={attempt} elapsed={elapsed:.2}s status={} bytes={} detail={last_err}",
+                            status.as_u16(),
+                            bytes.len()
+                        ),
+                    );
+                    if !retryable_status(status) {
+                        break;
+                    }
+                } else if bytes.is_empty() {
+                    last_err = "空响应体 (0 bytes)".to_string();
+                    diag::log(
+                        "WARN",
+                        "dl",
+                        task,
+                        "download_empty",
+                        &format!("attempt={attempt} elapsed={elapsed:.2}s status={}", status.as_u16()),
+                    );
+                } else if !ct.is_empty()
+                    && !ct.starts_with("image/")
+                    && !ct.contains("octet-stream")
+                {
+                    // S3/MinIO returns application/xml on 403/NoSuchKey.
+                    // Without this check it gets saved as a broken "png".
+                    last_err = format!(
+                        "响应不是图片: content-type={} body={}",
+                        ct_label,
+                        diag::snippet(&bytes, 200)
+                    );
+                    diag::log(
+                        "ERROR",
+                        "dl",
+                        task,
+                        "download_bad_content",
+                        &format!("attempt={attempt} elapsed={elapsed:.2}s detail={last_err}"),
+                    );
+                    break;
+                } else {
+                    let mime = ct.split(';').next().unwrap_or("").trim();
+                    let mime = if mime.is_empty() { "image/png" } else { mime }.to_string();
+                    diag::log(
+                        "INFO",
+                        "dl",
+                        task,
+                        "download_ok",
+                        &format!(
+                            "attempt={attempt} elapsed={elapsed:.2}s bytes={} mime={mime} url={safe}",
+                            bytes.len()
+                        ),
+                    );
+                    return Ok((bytes, mime));
+                }
+            }
+        }
+
+        if attempt < DL_ATTEMPTS {
+            // 0.5s / 1.5s with task-derived jitter so parallel tasks don't
+            // retry in lockstep against the same object-storage host.
+            let jitter = (task.len() % 5) as u64 * 40;
+            let backoff = 500u64 * (1u64 << (attempt - 1)) + jitter;
+            diag::log(
+                "INFO",
+                "dl",
+                task,
+                "download_retry",
+                &format!("after_ms={backoff} next_attempt={}", attempt + 1),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+        }
+    }
+
+    let wrap_hint = if has_space {
+        " | 注意: 接口返回的地址含空白字符,可能是被折行/截断后的无效 URL"
+    } else {
+        ""
+    };
+    Err(format!(
+        "下载图片失败（已尝试 {DL_ATTEMPTS} 次）: {last_err} | url={safe}{wrap_hint}"
+    ))
+}
+
 /// Resolve an http(s) URL or `data:` URI to raw bytes + mime.
-pub(crate) async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<u8>, String), String> {
+pub(crate) async fn src_to_bytes(
+    c: &reqwest::Client,
+    src: &str,
+    task: &str,
+) -> Result<(Vec<u8>, String), String> {
     if let Some(rest) = src.strip_prefix("data:") {
         let (meta, data) = rest.split_once(',').ok_or("无效的 data URI")?;
         let mime = meta.split(';').next().unwrap_or("image/png").to_string();
@@ -294,23 +487,7 @@ pub(crate) async fn src_to_bytes(c: &reqwest::Client, src: &str) -> Result<(Vec<
             .map_err(|e| format!("base64 解码失败: {e}"))?;
         Ok((bytes, mime))
     } else {
-        let resp = c
-            .get(src)
-            .send()
-            .await
-            .map_err(|e| format!("下载图片失败: {e}"))?;
-        let mime = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or("image/png").to_string())
-            .unwrap_or_else(|| "image/png".to_string());
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("读取图片字节失败: {e}"))?
-            .to_vec();
-        Ok((bytes, mime))
+        download_bytes(c, src, task).await
     }
 }
 
@@ -384,12 +561,13 @@ async fn ref_to_url(
     api_key: Option<&str>,
     token: Option<&str>,
     src: &str,
+    task: &str,
 ) -> Result<String, String> {
     let s = src.trim();
     if (s.starts_with("http://") || s.starts_with("https://")) && !is_loopback_url(s) {
         return Ok(s.to_string());
     }
-    let (bytes, mime) = resolve_src(c, s).await?;
+    let (bytes, mime) = resolve_src(c, s, task).await?;
     upload_image(c, upload_url, api_key, token, bytes, &mime).await
 }
 
@@ -467,9 +645,28 @@ pub async fn run_generation(
     if prompt.trim().is_empty() {
         return Err("prompt 不能为空".into());
     }
+    let task = diag::task_id();
     let base = normalize_base(base_url);
     let timeout_sec = timeout_sec.clamp(10, 1800);
     let c = http_client(timeout_sec as u64 + 60)?;
+    let auth_kind = if session_token.map(str::trim).filter(|t| !t.is_empty()).is_some() {
+        "token"
+    } else {
+        "api_key"
+    };
+    // Deliberately no prompt text, no keys, no reference-image URLs here.
+    diag::log(
+        "INFO",
+        "gen",
+        &task,
+        "generate_start",
+        &format!(
+            "base={base} model={model} size={} refs={} timeout_s={timeout_sec} auth={auth_kind} prompt_len={}",
+            size.unwrap_or("default"),
+            refs.iter().filter(|s| !s.trim().is_empty()).count(),
+            prompt.len()
+        ),
+    );
 
     let auth = resolve_auth(api_key, session_token);
 
@@ -495,12 +692,36 @@ pub async fn run_generation(
                     session_token,
                 ),
             };
-        eprintln!("[run_generation] 参考图上传到: {upload_url}");
+        diag::log(
+            "INFO",
+            "gen",
+            &task,
+            "upload_refs_start",
+            &format!("count={} endpoint={}", raw_refs.len(), diag::safe_url(&upload_url)),
+        );
         let mut ref_urls: Vec<String> = Vec::with_capacity(raw_refs.len());
-        for src in &raw_refs {
-            ref_urls.push(ref_to_url(&c, &upload_url, upload_key, upload_token, src).await?);
+        for (i, src) in raw_refs.iter().enumerate() {
+            let u = ref_to_url(&c, &upload_url, upload_key, upload_token, src.as_str(), task.as_str())
+                .await
+                .map_err(|e| {
+                    diag::log(
+                        "ERROR",
+                        "gen",
+                        &task,
+                        "upload_ref_failed",
+                        &format!("index={i} err={e}"),
+                    );
+                    e
+                })?;
+            ref_urls.push(u);
         }
-        eprintln!("[run_generation] 参考图 URL: {ref_urls:?}");
+        diag::log(
+            "INFO",
+            "gen",
+            &task,
+            "upload_refs_ok",
+            &format!("count={}", ref_urls.len()),
+        );
         body["image"] = serde_json::json!(ref_urls);
     }
     body["timeout_sec"] = serde_json::json!(timeout_sec);
@@ -512,7 +733,15 @@ pub async fn run_generation(
     }
 
     let url = format!("{base}/v1/images/generations");
+    diag::log(
+        "INFO",
+        "gen",
+        &task,
+        "generate_request",
+        &format!("url={url} timeout_s={timeout_sec}"),
+    );
     // Every generation request is charged, even on failure. Never auto-retry.
+    // The download stage below has its own, independent retry budget.
     let max_attempts: u32 = 1;
     let mut attempt: u32 = 0;
     let text = loop {
@@ -526,21 +755,32 @@ pub async fn run_generation(
         let elapsed = started.elapsed();
         let resp = match send_result {
             Ok(resp) => {
-                eprintln!(
-                    "[run_generation] 收到响应头: {} {:?} (耗时 {:.1}s, 第 {attempt}/{max_attempts} 次)",
-                    resp.status(),
-                    resp.version(),
-                    elapsed.as_secs_f64()
+                diag::log(
+                    "INFO",
+                    "gen",
+                    &task,
+                    "generate_headers",
+                    &format!(
+                        "status={} http={:?} elapsed={:.2}s attempt={attempt}/{max_attempts}",
+                        resp.status(),
+                        resp.version(),
+                        elapsed.as_secs_f64()
+                    ),
                 );
                 resp
             }
             Err(e) => {
-                let mut detail = e.to_string();
-                let mut src = std::error::Error::source(&e);
-                while let Some(s) = src {
-                    detail.push_str(&format!("\n  ↳ {s}"));
-                    src = s.source();
-                }
+                let detail = error_chain(&e);
+                diag::log(
+                    "ERROR",
+                    "gen",
+                    &task,
+                    "generate_transport_error",
+                    &format!(
+                        "elapsed={:.2}s attempt={attempt} url={url} err={detail}",
+                        elapsed.as_secs_f64()
+                    ),
+                );
                 return Err(format!(
                     "请求失败(等待 {:.0}s 后连接被关闭,服务器未返回任何数据): {detail}",
                     elapsed.as_secs_f64()
@@ -548,11 +788,30 @@ pub async fn run_generation(
             }
         };
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("读取响应失败: {e}"))?;
+        let text = resp.text().await.map_err(|e| {
+            let detail = error_chain(&e);
+            diag::log(
+                "ERROR",
+                "gen",
+                &task,
+                "generate_read_error",
+                &format!("elapsed={:.2}s err={detail}", elapsed.as_secs_f64()),
+            );
+            format!("读取响应失败: {detail}")
+        })?;
         if status.is_success() {
+            diag::log(
+                "INFO",
+                "gen",
+                &task,
+                "generate_response",
+                &format!(
+                    "status={} elapsed={:.2}s body_len={}",
+                    status.as_u16(),
+                    elapsed.as_secs_f64(),
+                    text.len()
+                ),
+            );
             break text;
         }
         let low = text.to_lowercase();
@@ -561,35 +820,88 @@ pub async fn run_generation(
             || low.contains("upload image failed")
             || status.as_u16() == 503;
         if transient && attempt < max_attempts {
-            eprintln!("[run_generation] 账号/上传类临时错误,重试 ({attempt}/{max_attempts})…");
+            diag::log(
+                "WARN",
+                "gen",
+                &task,
+                "generate_retry",
+                &format!("attempt={attempt}/{max_attempts} status={}", status.as_u16()),
+            );
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             continue;
         }
-        return Err(error_message(status, &text));
+        let msg = error_message(status, &text);
+        diag::log(
+            "ERROR",
+            "gen",
+            &task,
+            "generate_http_error",
+            &format!(
+                "status={} elapsed={:.2}s body_len={} detail={}",
+                status.as_u16(),
+                elapsed.as_secs_f64(),
+                text.len(),
+                truncate(&text, 300)
+            ),
+        );
+        return Err(msg);
     };
 
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {e}"))?;
-    let data = v["data"]
-        .as_array()
-        .ok_or_else(|| format!("响应缺少 data 数组: {}", truncate(&text, 300)))?;
+    let data = v["data"].as_array().ok_or_else(|| {
+        let msg = format!("响应缺少 data 数组: {}", truncate(&text, 300));
+        diag::log("ERROR", "gen", &task, "generate_bad_response", &msg);
+        msg
+    })?;
+    diag::log(
+        "INFO",
+        "gen",
+        &task,
+        "response_items",
+        &format!("count={}", data.len()),
+    );
 
     let mut outs = Vec::new();
     let mut last_err = String::new();
-    for item in data.iter() {
+    let mut failed_urls: Vec<String> = Vec::new();
+    for (i, item) in data.iter().enumerate() {
         let Some(src) = item["url"]
             .as_str()
             .or_else(|| item["b64_json"].as_str())
             .filter(|s| !s.is_empty())
         else {
+            // Only field names: an item may contain a multi-MB b64_json.
+            let keys = item
+                .as_object()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>().join(","))
+                .unwrap_or_default();
+            diag::log(
+                "WARN",
+                "gen",
+                &task,
+                "item_no_url",
+                &format!("index={i} keys={keys}"),
+            );
             continue;
         };
-        match resolve_src(&c, src).await {
+        let safe = diag::safe_url(src);
+        match resolve_src(&c, src, &task).await {
             Ok((bytes, mime)) => {
                 let source_url = src.starts_with("http").then(|| src.to_string());
                 outs.push((bytes, mime, source_url));
             }
-            Err(e) => last_err = e,
+            Err(e) => {
+                last_err = e;
+                failed_urls.push(safe.clone());
+                diag::log(
+                    "ERROR",
+                    "gen",
+                    &task,
+                    "item_failed",
+                    &format!("index={i} url={safe} err={last_err}"),
+                );
+            }
         }
     }
     if outs.is_empty() {
@@ -598,7 +910,37 @@ pub async fn run_generation(
         } else {
             last_err
         };
+        diag::log(
+            "ERROR",
+            "gen",
+            &task,
+            "task_failed",
+            &format!("failed_urls={} detail={detail}", failed_urls.join(",")),
+        );
         return Err(format!("未从响应中获取到图片: {detail}"));
+    }
+    if !failed_urls.is_empty() {
+        // Partial success used to be completely invisible to the user.
+        diag::log(
+            "WARN",
+            "gen",
+            &task,
+            "task_partial",
+            &format!(
+                "ok={} failed={} failed_urls={}",
+                outs.len(),
+                failed_urls.len(),
+                failed_urls.join(",")
+            ),
+        );
+    } else {
+        diag::log(
+            "INFO",
+            "gen",
+            &task,
+            "task_done",
+            &format!("images={}", outs.len()),
+        );
     }
     Ok(outs)
 }
@@ -720,6 +1062,33 @@ async fn platform_login(base: String, username: String, password: String) -> Res
     })
 }
 
+/// Let the frontend append its own events (update checks, install failures)
+/// to the same rotating log, so a broken updater is visible in the exact file
+/// the user exports for support.
+#[tauri::command]
+fn log_client_event(level: String, scope: String, event: String, fields: String) {
+    let lvl = match level.to_ascii_uppercase().as_str() {
+        "ERROR" => "ERROR",
+        "WARN" => "WARN",
+        _ => "INFO",
+    };
+    let scope: String = scope.chars().take(16).collect();
+    let event: String = event.chars().take(48).collect();
+    diag::log(lvl, &scope, "-", &event, &fields);
+}
+
+/// Paste-friendly diagnostic report (header + newest 64 KiB of the ring log).
+#[tauri::command]
+fn read_diagnostics(ctx: diag::DiagContext) -> String {
+    diag::read_diagnostics(ctx)
+}
+
+/// Full diagnostic report written to <Pictures>/linggan10s-image-tool/logs/.
+#[tauri::command]
+fn export_diagnostics(ctx: diag::DiagContext) -> Result<String, String> {
+    diag::export_diagnostics(ctx)
+}
+
 /// Push upstream credentials from the frontend into the gateway's shared state.
 /// Called whenever the user saves settings, so the iframe'd drama workspace can
 /// generate storyboard images and do voice dubbing (dashscope) without
@@ -747,6 +1116,7 @@ fn gateway_url(state: tauri::State<'_, SharedConfig>) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -767,6 +1137,17 @@ pub fn run() {
                 .unwrap_or_else(|_| std::env::temp_dir().join("linggan10s-projects"));
             let _ = std::fs::create_dir_all(&workspace_dir);
 
+            // Must be ready before any request runs: a release Windows GUI
+            // build has no console, so these files are the only diagnostic
+            // trail a user can hand over when something fails.
+            let log_dir = app
+                .path()
+                .picture_dir()
+                .or_else(|_| app.path().app_data_dir())
+                .map(|d| d.join("linggan10s-image-tool").join("logs"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("linggan10s-logs"));
+            diag::init(log_dir);
+
             let config: SharedConfig = Arc::new(RwLock::new(GatewayConfig {
                 workspace_dir,
                 ..Default::default()
@@ -781,7 +1162,10 @@ pub fn run() {
             read_saved_image,
             configure_gateway,
             gateway_url,
-            platform_login
+            platform_login,
+            read_diagnostics,
+            export_diagnostics,
+            log_client_event
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

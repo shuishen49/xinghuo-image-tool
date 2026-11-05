@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.1"
+version = "0.1.2"
 description = "灵感10s — 文生图 / 图生图 桌面客户端"
 authors = ["you"]
 license = ""
@@ -23,6 +23,9 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
+# Signed auto-update: verify + install NSIS installers from a static JSON feed.
+# Needs TAURI_SIGNING_PRIVATE_KEY at build time to emit the .sig file.
+tauri-plugin-updater = "2"
 # HTTP client for the OpenAI-compatible image API. default-tls = native-tls:
 # uses system OpenSSL on Linux (libssl-dev) and SChannel / Secure Transport on
 # Windows / macOS, so no extra crypto deps to cross-compile.

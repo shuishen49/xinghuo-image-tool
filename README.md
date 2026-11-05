@@ -33,6 +33,7 @@
 - **任务持久化**：任务列表与结果在重启后仍在（只存路径不存 base64，重新打开时从磁盘读回预览）。
 - **图片放大**：点任意结果图 / 参考图可全屏放大查看。
 - **🎬 漫剧工作台**（正式版默认隐藏）：内嵌一个本地工作台（分镜 / 剧本助手 / 角色库），由应用自带的 Rust 网关提供服务，无需外部依赖。详见下方说明。
+- **自动更新**：启动后静默检查新版本，由用户确认后下载安装（签名校验）。详见「自动更新」一节。
 
 ---
 
@@ -166,6 +167,115 @@ npx tauri build
 - **强制 HTTP/2（rustls）**：Windows 自带的 SChannel(native-tls) 在 ALPN 协商上不稳，常降级到 HTTP/1.1，而服务端网关会在约 120s 把空闲的 HTTP/1.1 长连接掐断。改用 `rustls` 可靠协商出 HTTP/2，配合 **HTTP/2 KeepAlive PING** 心跳，长达数分钟的生成请求不再被当成空闲连接断开。
 - **账号错误自动重试**：服务端轮换 ChatGPT 账号，偶尔抽到 token 被吊销的账号会快速失败（`token_revoked`），客户端遇到这类临时错误会自动重试，重新抽号。
 - **每请求独立连接**：禁用空闲连接池复用，避免并发长连接触发 rustls 的 TLS 状态问题。
+
+---
+
+## 出图失败排查：诊断日志
+
+线上是 Windows GUI 程序，没有控制台，`eprintln!` 在用户机器上是被丢掉的；`tauri-plugin-log` 也只在 debug 构建挂载。所以所有关键节点现在都写入本地日志文件，**不需要用户手动开 debug 模式或抓控制台**。
+
+### 用户怎么把日志给我
+
+设置页最下方「🩺 出图失败？导出诊断日志」：
+
+| 操作 | 得到什么 | 适合 |
+|---|---|---|
+| **复制最近日志** | 环境摘要 + 最近 64 KB 日志，直接进剪贴板 | 直接粘贴到聊天里，最快 |
+| **导出日志文件** | 完整日志（≤ 512 KB）写到 `图片/linggan10s-image-tool/logs/diagnostics-<时间戳>.txt`，并自动复制路径 | 发文件、留档 |
+| 失败任务卡上的 **复制错误** | 该任务报错全文 + 本地时间 | 只想报一句错误时 |
+
+导出的文件自带环境摘要（版本、系统、接口地址、登录方式、模型、超时/并发、导出时间），即使只发文件也能定位。
+
+### 日志策略
+
+- **循环写入、总量封顶**：`logs/app.log` + `logs/app.1.log`，各 256 KB；当前文件写满就把旧的挤到 `.1.log`，再写满覆盖最旧的一半。**任何时刻本机占用不超过 512 KB**，长期挂着也不会膨胀。
+- **一行一事件**：`UTC 时间 [级别] [模块] [任务ID] event=xxx key=value ...`。同一个 `任务ID` 串起「发起 → 响应 → 每张图下载 → 成功/失败」，并发多任务也不会混。
+- **关键字段**：HTTP 状态码、协议版本、各阶段耗时、响应长度、`data` 条数、图片 URL（保留 path 便于判断 403/404）、URL 是否含空格、完整 reqwest 错误链（DNS / 连接被拒 / TLS / 读超时）、非图片响应的前 200 字符。
+- **隐私**：不记 API Key、Token、密码、提示词原文、图片内容、base64；URL 里 `signature/token/key/...` 等查询参数自动打码，URL authority 里的账号密码也会打码。日志脱敏在落盘前完成。
+
+### 关于「未从响应中获取到图片：下载图片失败」
+
+服务端生成已成功并返回图片地址后才走到下载，这一步是**幂等 GET、不会重复计费**，所以重试加在这里；而生成请求 `POST /v1/images/generations` 一次调用一次计费，代码里 `max_attempts = 1` 是刻意保留的，**任何情况下都不要给它加重试**。
+
+下载阶段的行为：
+
+- 单次 20s 超时（覆盖生成用的最长 11 分钟客户端超时），最多 3 次，中间 0.5s / 1.5s 退避 + 轻微抖动，整个重试预算控制在结果链接的有效期内。
+- 只对连接类错误、408 / 429 / 5xx、空响应重试；**403 / 404 立刻放弃**（对象存储临时链接过期，重试只是白等）、非 `image/*` 的错误页也立刻失败，不再把 XML/HTML 当成坏掉的 png 存盘。
+- 失败时把尝试次数、完整错误链和原始 URL 一起写进错误文本，用户点「复制错误」就能给到完整线索。
+- 部分图片下载失败（例如 4 张里挂了 1 张）会记 `event=task_partial`，不再静默少图。
+
+> 结果图 URL 有生命周期，用户事后手动打开报 404 属于正常现象。日志里的 `download_start` / `download_error` / `download_http_error` 时间戳能判断失败发生在窗口内还是窗口外，据此区分「当时网络问题」和「链接已失效 / 服务端清理过早」。
+
+---
+
+## 自动更新（Tauri Updater）
+
+客户端用官方 `tauri-plugin-updater` 做**签名校验 + 安装**：
+
+- 启动 6 秒后静默检查一次（网络不通只写诊断日志，不打扰用户）；设置页「🔄 版本更新」可手动检查。
+- **两段式确认**：检查到新版本只把按钮变成「下载并安装 vX」，用户再点一次才真正下载 —— 因为 Windows 安装程序运行时会强制退出应用，自动安装会打断正在生成的任务。
+- 安装过程显示下载进度；安装完成应用自动退出。所有检查/安装失败都会写进诊断日志（`event=update_check_failed` / `update_install_failed`），用「复制最近日志」就能排查。
+
+### 更新源（重点：官网是 SPA，别把文件放进回退路由）
+
+配置在 `src-tauri/tauri.conf.json`：
+
+```json
+"plugins": { "updater": {
+  "pubkey": "<minisign 公钥>",
+  "endpoints": ["https://linggan10s.com/download/latest.json"]
+} }
+```
+
+> ⚠️ 实测 `https://linggan10s.com/download/latest.json` 目前返回 **HTTP 200 + 首页 HTML**（SPA 全路径回退），
+> 而 `/images/...` 才是真静态资源。更新清单必须放在网站**真实静态目录**（如前端 `public/download/`），
+> 或在 Nginx / CDN 上给 `/download/` 配一条直出规则。发布后用下面这条命令验收，必须是 JSON 而不是 `<!DOCTYPE html>`：
+>
+> ```bash
+> curl -i https://linggan10s.com/download/latest.json | head -20
+> ```
+>
+> 如果这条路走不通，把 `endpoints` 换成任意可直出静态 JSON 的地址（对象存储、GitHub Release 的 `latest.json` 都行），
+> 改完重新打包即可，客户端逻辑不用动。
+
+清单格式由 CI 自动生成（`.github/workflows/build-windows.yml`）：
+
+```json
+{
+  "version": "v0.1.2",
+  "notes": "灵感10s v0.1.2",
+  "pub_date": "2026-11-05T10:30:00Z",
+  "platforms": { "windows-x86_64": {
+    "signature": "<.sig 文件内容>",
+    "url": "https://linggan10s.com/download/XinghuoImageTool-0.1.2-x64-setup.exe"
+  } }
+}
+```
+
+### 签名密钥
+
+- 已生成一对密钥，放在**项目外**、绝不提交：
+  `C:\Users\Administrator\.workbuddy\keys\linggan10s-updater.key`（私钥）与 `.key.pub`（公钥）。
+- 公钥已写入 `tauri.conf.json`。**私钥丢了就无法再签发更新**，请自行备份（密码管理器 / 离线 U 盘）。
+- CI 需要把私钥内容配成仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`（这把密钥没有密码）。
+  本地用 `package.bat` 打包时设 `TAURI_SIGNING_PRIVATE_KEY_PATH` 指向私钥文件，才会生成 `.sig`。
+- 未配置密钥时 CI 跳过 `latest.json` 生成，不影响普通安装包产出。
+
+### 发布一个新版
+
+1. 三处版本号同步：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`。
+2. 提交后打 tag 推送（如 `git tag v0.1.2 && git push origin v0.1.2`），或在 Actions 手动触发并勾 `publish`。
+3. CI 产出：`XinghuoImageTool-<ver>-x64-setup.exe`、绿色版 exe / zip、`.sig` 签名、`latest.json`。
+4. 把 **setup 安装包 + latest.json** 放到官网 `/download/`（两个文件，路径要和清单里的 `url` 一致）。
+   验收：清单返回 JSON、安装包可下载、`.sig` 与清单 `signature` 一致。
+5. 已安装的旧版本启动后会提示更新。
+
+想让第 4 步全自动，在仓库 Secrets 里配 `UPDATE_SSH_HOST` / `UPDATE_SSH_USER` / `UPDATE_SSH_PORT` /
+`UPDATE_SSH_PRIVATE_KEY` / `UPDATE_REMOTE_DIR`，CI 会用 scp 把安装包和清单推到网站静态目录；
+不配就跳过，从 Release 下载两个文件手动放即可。
+
+> 本机没有 Rust 工具链，`Cargo.toml` 新增的 `tauri-plugin-updater` 依赖条目会由 CI 首次构建时写进
+> `Cargo.lock`；拿到 CI 生成的 lock 后记得提交回来，保持三处一致。
 
 ---
 

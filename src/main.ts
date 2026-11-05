@@ -1,5 +1,7 @@
 import "./style.css";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { check } from "@tauri-apps/plugin-updater";
 
 // ---------- types ----------
 interface ImageOut {
@@ -488,6 +490,36 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         点「生成」会把任务加入队列并立刻返回，可连续提交；同时进行的数量由「最大同时任务数」控制，多出的会排队。<br />
         漫剧工作台的所有 Key <b>留在 Rust 端</b>，工作台页面拿不到。
       </p>
+
+      <hr style="border-color:var(--border);margin:18px 0 14px;" />
+      <div class="field">
+        <span>🔄 版本更新</span>
+        <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="mini" id="btn-check-update" type="button">检查更新</button>
+          <span id="app-version" style="font-size:13px;color:var(--muted);"></span>
+        </div>
+        <div class="status" id="update-status"></div>
+        <p class="hint">
+          启动时会自动检查；发现新版本后<b>由你点一次确认</b>才下载安装，不会打断正在生成的任务。
+          Windows 上安装程序运行时应用会自动退出。
+        </p>
+      </div>
+
+      <hr style="border-color:var(--border);margin:18px 0 14px;" />
+      <div class="field">
+        <span>🩺 出图失败？导出诊断日志</span>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <button class="mini" id="btn-copy-diag" type="button">📋 复制最近日志</button>
+          <button class="mini" id="btn-export-diag" type="button">💾 导出日志文件</button>
+        </div>
+        <div class="status" id="diag-status"></div>
+        <p class="hint">
+          失败后点「复制最近日志」，直接粘贴发来即可定位；「导出日志文件」会存到
+          <code>图片/linggan10s-image-tool/logs/</code> 并自动复制文件路径。<br />
+          日志只记时间、耗时、HTTP 状态、错误原因和图片地址，<b>不含 API Key / Token / 密码 / 提示词原文</b>，
+          签名参数自动打码。本机循环写入，合计不超过 512 KB。
+        </p>
+      </div>
     </section>
   </main>
 `;
@@ -773,6 +805,17 @@ function buildTaskCard(t: Task): HTMLDivElement {
     rm.addEventListener("click", () => removeTask(t.id));
     acts.appendChild(rm);
   }
+  if (t.status === "error") {
+    const cp = document.createElement("button");
+    cp.className = "mini";
+    cp.textContent = "复制错误";
+    cp.addEventListener("click", async () => {
+      const ok = await copyText(`灵感10s 报错 · ${new Date().toLocaleString()}\n${t.error}`);
+      cp.textContent = ok ? "已复制 ✓" : "复制失败";
+      setTimeout(() => (cp.textContent = "复制错误"), 1200);
+    });
+    acts.appendChild(cp);
+  }
   head.appendChild(acts);
   card.appendChild(head);
 
@@ -975,6 +1018,164 @@ function loadTasks(): void {
 
 loadTasks();
 renderTasks();
+
+// ---------- auto update ----------
+// Two-step by design: the silent startup check only *offers* an update;
+// downloading/installing starts from an explicit click, because the Windows
+// installer kills the running app and would abort in-flight generation tasks.
+type PendingUpdate = NonNullable<Awaited<ReturnType<typeof check>>>;
+let pendingUpdate: PendingUpdate | null = null;
+let appVersionText = "unknown";
+
+async function logClient(level: string, event: string, fields: string): Promise<void> {
+  try {
+    await invoke("log_client_event", { level, scope: "update", event, fields });
+  } catch {
+    // Diagnostics must never break the UI.
+  }
+}
+
+async function checkForUpdate(manual: boolean): Promise<void> {
+  const btn = byId<HTMLButtonElement>("btn-check-update");
+  if (manual) {
+    btn.disabled = true;
+    setStatus("update-status", "正在检查更新…", "busy");
+  }
+  try {
+    const update = await check();
+    if (update) {
+      pendingUpdate = update;
+      btn.textContent = `⬇ 下载并安装 v${update.version}`;
+      setStatus(
+        "update-status",
+        manual
+          ? `发现新版本 v${update.version}，再点一次按钮开始下载安装。`
+          : `发现新版本 v${update.version}，点上方按钮即可更新。`,
+        "ok",
+      );
+      void logClient("INFO", "update_available", `version=${update.version} current=${appVersionText}`);
+    } else {
+      pendingUpdate = null;
+      btn.textContent = "检查更新";
+      if (manual) setStatus("update-status", "已是最新版本 ✓", "ok");
+      void logClient("INFO", "update_none", `manual=${manual} current=${appVersionText}`);
+    }
+  } catch (e) {
+    const msg = String(e);
+    if (manual) setStatus("update-status", `检查更新失败：${msg}`, "error");
+    void logClient("ERROR", "update_check_failed", `manual=${manual} err=${msg}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function installPendingUpdate(): Promise<void> {
+  const update = pendingUpdate;
+  if (!update) return;
+  const btn = byId<HTMLButtonElement>("btn-check-update");
+  btn.disabled = true;
+  let total = 0;
+  let done = 0;
+  try {
+    setStatus("update-status", "正在下载新版本…", "busy");
+    void logClient("INFO", "update_install_start", `version=${update.version}`);
+    await update.downloadAndInstall((ev) => {
+      switch (ev.event) {
+        case "Started":
+          total = ev.data.contentLength ?? 0;
+          break;
+        case "Progress":
+          done += ev.data.chunkLength ?? 0;
+          setStatus(
+            "update-status",
+            `正在下载… ${total > 0 ? Math.round((done / total) * 100) : 0}%`,
+            "busy",
+          );
+          break;
+        case "Finished":
+          setStatus("update-status", "下载完成，正在安装（应用将自动退出）…", "busy");
+          break;
+      }
+    });
+    void logClient("INFO", "update_installed", `version=${update.version}`);
+    setStatus("update-status", "更新已安装，应用即将退出；若未自动重启请手动打开。", "ok");
+  } catch (e) {
+    const msg = String(e);
+    setStatus("update-status", `更新失败：${msg}`, "error");
+    void logClient("ERROR", "update_install_failed", `version=${update.version} err=${msg}`);
+    btn.textContent = `重试安装 v${update.version}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+byId<HTMLButtonElement>("btn-check-update").addEventListener("click", () => {
+  if (pendingUpdate) void installPendingUpdate();
+  else void checkForUpdate(true);
+});
+
+void (async () => {
+  try {
+    appVersionText = await getVersion();
+  } catch {
+    appVersionText = "未知";
+  }
+  byId("app-version").textContent = `当前版本 v${appVersionText}`;
+  // Delayed: a slow or blocked update server must never delay app startup.
+  window.setTimeout(() => void checkForUpdate(false), 6000);
+})();
+
+// ---------- diagnostics export ----------
+/** Non-secret environment snapshot that accompanies every exported log. */
+function diagContext() {
+  return {
+    baseUrl: (settings.baseUrl || DEFAULT_BASE).trim(),
+    model: settings.model,
+    authMode: settings.authMode,
+    timeoutSec: settings.timeoutSec,
+    maxConcurrent: settings.maxConcurrent,
+    uploadUrlCustom: !!(settings.uploadUrl || "").trim(),
+    os: navigator.userAgent,
+    localTime: new Date().toLocaleString(),
+    note: "",
+  };
+}
+
+// Two paths: paste straight into a chat (recent 64 KiB), or hand over a file
+// with the full 512 KiB ring. Both are one click and need no file picker.
+byId<HTMLButtonElement>("btn-copy-diag").addEventListener("click", async () => {
+  const btn = byId<HTMLButtonElement>("btn-copy-diag");
+  btn.disabled = true;
+  try {
+    const text = await invoke<string>("read_diagnostics", { ctx: diagContext() });
+    const ok = await copyText(text);
+    setStatus(
+      "diag-status",
+      ok
+        ? `已复制最近日志（${text.length} 字符），直接粘贴发来即可 ✓`
+        : "剪贴板不可用，请改用「导出日志文件」",
+      ok ? "ok" : "error",
+    );
+  } catch (e) {
+    setStatus("diag-status", `读取日志失败：${e}`, "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+byId<HTMLButtonElement>("btn-export-diag").addEventListener("click", async () => {
+  const btn = byId<HTMLButtonElement>("btn-export-diag");
+  btn.disabled = true;
+  try {
+    const path = await invoke<string>("export_diagnostics", { ctx: diagContext() });
+    await copyText(path);
+    setStatus("diag-status", `已导出（路径已复制）：${path}`, "ok");
+  } catch (e) {
+    setStatus("diag-status", `导出失败：${e}`, "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ---------- settings wiring ----------
 const baseInput = byId<HTMLInputElement>("set-base");

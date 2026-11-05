@@ -701,7 +701,8 @@ async fn save_char_file(ws: &Path, name: &str, bytes: &[u8], mime: &str) -> Resu
 }
 
 async fn download_scene(ws: &Path, url: &str, proj: &str, seg: &str) -> Result<(PathBuf, String), String> {
-    let (bytes, mime) = crate::src_to_bytes(&crate::http_client(60)?, url).await?;
+    let task = crate::diag::task_id();
+    let (bytes, mime) = crate::src_to_bytes(&crate::http_client(60)?, url, &task).await?;
     save_scene_file(ws, proj, seg, &bytes, &mime, "scene")
 }
 

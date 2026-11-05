@@ -61,6 +61,17 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      # Signing key for updater artifacts (.sig). Store the PRIVATE key as a
+      # GitHub Actions secret; the matching public key lives in tauri.conf.json.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      # Optional: when all of these are set, the built installer + manifest
+      # are pushed straight to the website's static download directory.
+      UPDATE_SSH_HOST: ${{ secrets.UPDATE_SSH_HOST }}
+      UPDATE_SSH_USER: ${{ secrets.UPDATE_SSH_USER }}
+      UPDATE_SSH_PORT: ${{ secrets.UPDATE_SSH_PORT }}
+      UPDATE_SSH_PRIVATE_KEY: ${{ secrets.UPDATE_SSH_PRIVATE_KEY }}
+      UPDATE_REMOTE_DIR: ${{ secrets.UPDATE_REMOTE_DIR }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -133,6 +144,33 @@ jobs:
 
           Get-ChildItem -Recurse stage, out | Select-Object FullName, Length | Format-Table -AutoSize
 
+      # Static updater feed: Tauri signs the NSIS installer and we publish the
+      # matching signature + download URL as latest.json. Upload this file and
+      # the installer to the site's real static directory (NOT an SPA route).
+      - name: Generate updater manifest (latest.json)
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '${{ steps.collect.outputs.ver }}'
+          $sig = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Filter '*.sig' -Recurse -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $sig) { throw '未找到 .sig 签名文件：请确认 TAURI_SIGNING_PRIVATE_KEY 已配置，且 tauri build 生成了 updater 产物' }
+          $signature = (Get-Content $sig.FullName -Raw).Trim()
+          $manifest = [ordered]@{
+            version   = "v$ver"
+            notes     = "灵感10s v$ver"
+            pub_date  = [DateTime]::UtcNow.ToString('o')
+            platforms = @{
+              'windows-x86_64' = [ordered]@{
+                signature = $signature
+                url       = "https://linggan10s.com/download/XinghuoImageTool-$ver-x64-setup.exe"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path 'stage/latest.json' -Encoding utf8
+          Get-Content 'stage/latest.json'
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -171,3 +209,21 @@ jobs:
           files: |
             stage/*
             out/*
+
+      # Optional: push the installer + manifest to the website automatically.
+      # Enable by setting UPDATE_SSH_* secrets; otherwise download the two
+      # files from the Release and place them under /download/ manually.
+      - name: Publish updater files to website
+        if: env.TAURI_SIGNING_PRIVATE_KEY != '' && env.UPDATE_SSH_HOST != '' && env.UPDATE_REMOTE_DIR != '' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish))
+        shell: bash
+        run: |
+          set -euo pipefail
+          port="${UPDATE_SSH_PORT:-22}"
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$UPDATE_SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+          ssh-keyscan -p "$port" -H "$UPDATE_SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          scp -i "$HOME/.ssh/deploy_key" -P "$port" -o StrictHostKeyChecking=yes \
+            stage/*.exe stage/latest.json \
+            "$UPDATE_SSH_USER@$UPDATE_SSH_HOST:$UPDATE_REMOTE_DIR/"
+          echo "已上传安装包与 latest.json 到 $UPDATE_REMOTE_DIR"
