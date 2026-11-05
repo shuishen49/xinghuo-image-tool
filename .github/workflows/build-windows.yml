@@ -82,30 +82,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 只报告「配了哪些名字 / 是否非空 / 长度」，绝不打印任何值。
-      # 用 ::warning:: 输出成 annotations，公开 check-runs API 就能匿名读到。
-      # 查清配置问题后可以删掉这一步。
-      - name: Diagnose Actions config (names only)
-        continue-on-error: true
-        shell: bash
-        env:
-          # 不要写 toJSON(secrets)：GitHub 会把含该表达式的运行挂成
-          # action_required 等待人工批准，job 根本不会启动。
-          # 用 bash + console.log 输出 ::error::，才能变成可读的 annotation
-          # （pwsh 的 Write-Host 不会生成 annotation）。
-          VARS_JSON: ${{ toJSON(vars) }}
-        run: |
-          node -e '
-            let names = [];
-            try { names = Object.keys(JSON.parse(process.env.VARS_JSON || "{}")).sort(); } catch (e) {}
-            console.log("::error::Repo Variables names: " + (names.join(", ") || "(none)"));
-            for (const n of ["TAURI_SIGNING_PRIVATE_KEY", "UPDATE_SSH_HOST", "UPDATE_SSH_USER",
-                             "UPDATE_SSH_PORT", "UPDATE_SSH_PRIVATE_KEY", "UPDATE_REMOTE_DIR"]) {
-              const v = process.env[n] || "";
-              console.log("::error::" + n + " = " + (v ? "SET (len=" + v.length + ")" : "EMPTY"));
-            }
-          '
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

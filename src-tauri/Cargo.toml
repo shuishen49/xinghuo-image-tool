@@ -25,7 +25,9 @@ tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
 # Signed auto-update: verify + install NSIS installers from a static JSON feed.
 # Needs TAURI_SIGNING_PRIVATE_KEY at build time to emit the .sig file.
-tauri-plugin-updater = "2"
+# 必须和 package.json 里的 @tauri-apps/plugin-updater 保持同一 major/minor。
+# 用 "2" 会让 cargo 解析到 2.12.x，Tauri CLI 直接拒绝构建。
+tauri-plugin-updater = "=2.11.0"
 # HTTP client for the OpenAI-compatible image API. default-tls = native-tls:
 # uses system OpenSSL on Linux (libssl-dev) and SChannel / Secure Transport on
 # Windows / macOS, so no extra crypto deps to cross-compile.
