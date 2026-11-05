@@ -89,7 +89,8 @@ jobs:
         continue-on-error: true
         shell: pwsh
         env:
-          SECRETS_JSON: ${{ toJSON(secrets) }}
+          # 不要写 toJSON(secrets)：GitHub 会把含该表达式的运行挂成
+          # action_required 等待人工批准，job 根本不会启动。
           VARS_JSON: ${{ toJSON(vars) }}
         run: |
           function Get-Names($raw) {
@@ -99,9 +100,7 @@ jobs:
             } catch { }
             return @()
           }
-          $sn = Get-Names $env:SECRETS_JSON
           $vn = Get-Names $env:VARS_JSON
-          Write-Host "::error::Repo Secrets names   : $(if ($sn.Count) { $sn -join ', ' } else { '(none)' })"
           Write-Host "::error::Repo Variables names : $(if ($vn.Count) { $vn -join ', ' } else { '(none)' })"
           foreach ($n in @('TAURI_SIGNING_PRIVATE_KEY', 'UPDATE_SSH_HOST', 'UPDATE_SSH_USER',
                            'UPDATE_SSH_PORT', 'UPDATE_SSH_PRIVATE_KEY', 'UPDATE_REMOTE_DIR')) {
