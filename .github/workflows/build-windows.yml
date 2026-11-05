@@ -87,30 +87,24 @@ jobs:
       # 查清配置问题后可以删掉这一步。
       - name: Diagnose Actions config (names only)
         continue-on-error: true
-        shell: pwsh
+        shell: bash
         env:
           # 不要写 toJSON(secrets)：GitHub 会把含该表达式的运行挂成
           # action_required 等待人工批准，job 根本不会启动。
+          # 用 bash + console.log 输出 ::error::，才能变成可读的 annotation
+          # （pwsh 的 Write-Host 不会生成 annotation）。
           VARS_JSON: ${{ toJSON(vars) }}
         run: |
-          function Get-Names($raw) {
-            try {
-              $v = $raw | ConvertFrom-Json
-              if ($v) { return @($v.PSObject.Properties.Name | Sort-Object) }
-            } catch { }
-            return @()
-          }
-          $vn = Get-Names $env:VARS_JSON
-          Write-Host "::error::Repo Variables names : $(if ($vn.Count) { $vn -join ', ' } else { '(none)' })"
-          foreach ($n in @('TAURI_SIGNING_PRIVATE_KEY', 'UPDATE_SSH_HOST', 'UPDATE_SSH_USER',
-                           'UPDATE_SSH_PORT', 'UPDATE_SSH_PRIVATE_KEY', 'UPDATE_REMOTE_DIR')) {
-            $val = [Environment]::GetEnvironmentVariable($n)
-            if ([string]::IsNullOrEmpty($val)) {
-              Write-Host "::error::$n = EMPTY"
-            } else {
-              Write-Host "::error::$n = SET (len=$($val.Length))"
+          node -e '
+            let names = [];
+            try { names = Object.keys(JSON.parse(process.env.VARS_JSON || "{}")).sort(); } catch (e) {}
+            console.log("::error::Repo Variables names: " + (names.join(", ") || "(none)"));
+            for (const n of ["TAURI_SIGNING_PRIVATE_KEY", "UPDATE_SSH_HOST", "UPDATE_SSH_USER",
+                             "UPDATE_SSH_PORT", "UPDATE_SSH_PRIVATE_KEY", "UPDATE_REMOTE_DIR"]) {
+              const v = process.env[n] || "";
+              console.log("::error::" + n + " = " + (v ? "SET (len=" + v.length + ")" : "EMPTY"));
             }
-          }
+          '
 
       - name: Setup Node
         uses: actions/setup-node@v4
