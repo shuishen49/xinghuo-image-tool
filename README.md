@@ -216,27 +216,27 @@ npx tauri build
 - **两段式确认**：检查到新版本只把按钮变成「下载并安装 vX」，用户再点一次才真正下载 —— 因为 Windows 安装程序运行时会强制退出应用，自动安装会打断正在生成的任务。
 - 安装过程显示下载进度；安装完成应用自动退出。所有检查/安装失败都会写进诊断日志（`event=update_check_failed` / `update_install_failed`），用「复制最近日志」就能排查。
 
-### 更新源（重点：官网是 SPA，别把文件放进回退路由）
+### 更新源（专用域名 `update.linggan10s.com`）
 
 配置在 `src-tauri/tauri.conf.json`：
 
 ```json
 "plugins": { "updater": {
   "pubkey": "<minisign 公钥>",
-  "endpoints": ["https://linggan10s.com/download/latest.json"]
+  "endpoints": ["https://update.linggan10s.com/linggan10s-image-tool/latest.json"]
 } }
 ```
 
-> ⚠️ 实测 `https://linggan10s.com/download/latest.json` 目前返回 **HTTP 200 + 首页 HTML**（SPA 全路径回退），
-> 而 `/images/...` 才是真静态资源。更新清单必须放在网站**真实静态目录**（如前端 `public/download/`），
-> 或在 Nginx / CDN 上给 `/download/` 配一条直出规则。发布后用下面这条命令验收，必须是 JSON 而不是 `<!DOCTYPE html>`：
+> **更新域名是 `update.linggan10s.com`**，旧的 `update.linggan10s.shop` 已停用，别再引用。
+> 它指向服务器上现成的静态分发目录（nginx `root /opt/hot-update-server/public`），实测
+> `/vm_clone_win/manifest.json` 返回 `200 application/json`，是直出静态文件、没有 SPA 回退。
+>
+> 主站 `linggan10s.com` 反而是 SPA 应用，`/download/latest.json` 这类未知路径会返回
+> **200 + 首页 HTML**，绝不能拿来放清单。发布后这样验收，必须是 JSON 而不是 `<!DOCTYPE html>`：
 >
 > ```bash
-> curl -i https://linggan10s.com/download/latest.json | head -20
+> curl -i https://update.linggan10s.com/linggan10s-image-tool/latest.json | head -20
 > ```
->
-> 如果这条路走不通，把 `endpoints` 换成任意可直出静态 JSON 的地址（对象存储、GitHub Release 的 `latest.json` 都行），
-> 改完重新打包即可，客户端逻辑不用动。
 
 清单格式由 CI 自动生成（`.github/workflows/build-windows.yml`）：
 
@@ -247,7 +247,7 @@ npx tauri build
   "pub_date": "2026-11-05T10:30:00Z",
   "platforms": { "windows-x86_64": {
     "signature": "<.sig 文件内容>",
-    "url": "https://linggan10s.com/download/XinghuoImageTool-0.1.2-x64-setup.exe"
+    "url": "https://update.linggan10s.com/linggan10s-image-tool/XinghuoImageTool-0.1.2-x64-setup.exe"
   } }
 }
 ```
@@ -266,7 +266,8 @@ npx tauri build
 1. 三处版本号同步：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`。
 2. 提交后打 tag 推送（如 `git tag v0.1.2 && git push origin v0.1.2`），或在 Actions 手动触发并勾 `publish`。
 3. CI 产出：`XinghuoImageTool-<ver>-x64-setup.exe`、绿色版 exe / zip、`.sig` 签名、`latest.json`。
-4. 把 **setup 安装包 + latest.json** 放到官网 `/download/`（两个文件，路径要和清单里的 `url` 一致）。
+4. 把 **setup 安装包 + latest.json** 上传到服务器
+   `/opt/hot-update-server/public/linggan10s-image-tool/`（两个文件，路径要和清单里的 `url` 一致）。
    验收：清单返回 JSON、安装包可下载、`.sig` 与清单 `signature` 一致。
 5. 已安装的旧版本启动后会提示更新。
 

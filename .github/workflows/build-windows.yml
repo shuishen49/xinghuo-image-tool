@@ -93,6 +93,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # No signing key configured => build a plain installer instead of
+      # failing on updater artifacts. The .sig + latest.json can then be
+      # produced locally with `npx tauri signer sign` and uploaded manually.
+      - name: Disable updater artifacts without signing key
+        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
+        shell: pwsh
+        run: |
+          $p = 'src-tauri/tauri.conf.json'
+          $c = Get-Content $p -Raw | ConvertFrom-Json
+          $c.bundle.createUpdaterArtifacts = $false
+          $c | ConvertTo-Json -Depth 20 | Set-Content $p -Encoding utf8
+          Write-Host 'createUpdaterArtifacts=false（未配置签名密钥，跳过 updater 产物）'
+
       - name: tauri build (frontend + Rust release + installer)
         id: tauri_build
         shell: bash
@@ -109,9 +122,15 @@ jobs:
           {
             echo '## tauri build 失败'
             echo '```'
-            grep -nE '^(error|error\[|warning: unused)' -A 8 build.log | tail -n 150
+            grep -nE '^(error|Error|error\[|failed|Failed)' -A 8 build.log | tail -n 150 || true
+            tail -n 60 build.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Annotations are readable from the public check-runs API, so a
+          # failure can be diagnosed without an admin token / gh CLI.
+          tail -n 25 build.log | sed -E 's/%/%25/g; s/\r/%0D/g' | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::$line"
+          done || true
 
       - name: Collect artifacts
         id: collect
@@ -164,7 +183,7 @@ jobs:
             platforms = @{
               'windows-x86_64' = [ordered]@{
                 signature = $signature
-                url       = "https://linggan10s.com/download/XinghuoImageTool-$ver-x64-setup.exe"
+                url       = "https://update.linggan10s.com/linggan10s-image-tool/XinghuoImageTool-$ver-x64-setup.exe"
               }
             }
           }
