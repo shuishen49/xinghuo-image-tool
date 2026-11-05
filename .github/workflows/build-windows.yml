@@ -64,17 +64,20 @@ jobs:
     env:
       # Signing key for updater artifacts (.sig). Store the PRIVATE key as a
       # GitHub Actions secret; the matching public key lives in tauri.conf.json.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      # 同时兼容 Repository Variables：Settings 里 Secrets / Variables 是两个
+      # 不同标签页，很容易配到 Variables 去，而 workflow 只读 secrets 时取不到值。
+      # 注意私钥请放 Secrets（加密 + 日志屏蔽），Variables 是明文。
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || vars.TAURI_SIGNING_PRIVATE_KEY }}
       # 私钥是 rsign 加密格式（密码为空）。CI 里不显式给密码，签名阶段可能
       # 一直等 tty 读密码把构建挂住（本机 signer sign 已踩过这个坑）。
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
       # Optional: when all of these are set, the built installer + manifest
       # are pushed straight to the website's static download directory.
-      UPDATE_SSH_HOST: ${{ secrets.UPDATE_SSH_HOST }}
-      UPDATE_SSH_USER: ${{ secrets.UPDATE_SSH_USER }}
-      UPDATE_SSH_PORT: ${{ secrets.UPDATE_SSH_PORT }}
-      UPDATE_SSH_PRIVATE_KEY: ${{ secrets.UPDATE_SSH_PRIVATE_KEY }}
-      UPDATE_REMOTE_DIR: ${{ secrets.UPDATE_REMOTE_DIR }}
+      UPDATE_SSH_HOST: ${{ secrets.UPDATE_SSH_HOST || vars.UPDATE_SSH_HOST }}
+      UPDATE_SSH_USER: ${{ secrets.UPDATE_SSH_USER || vars.UPDATE_SSH_USER }}
+      UPDATE_SSH_PORT: ${{ secrets.UPDATE_SSH_PORT || vars.UPDATE_SSH_PORT }}
+      UPDATE_SSH_PRIVATE_KEY: ${{ secrets.UPDATE_SSH_PRIVATE_KEY || vars.UPDATE_SSH_PRIVATE_KEY }}
+      UPDATE_REMOTE_DIR: ${{ secrets.UPDATE_REMOTE_DIR || vars.UPDATE_REMOTE_DIR }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
