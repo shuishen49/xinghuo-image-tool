@@ -47,10 +47,15 @@ const base = endpoint.slice(0, endpoint.lastIndexOf("/") + 1);
 const exeName = basename(file);
 
 // Tauri CLI 会在被签文件旁生成 <file>.sig。Windows 上 npx 是 .cmd，需要 shell。
+// 私钥文件是 rsign 加密格式，即使是用 `--ci` 生成的无密码密钥也一样：
+// 不给密码时 CLI 会等 tty 读密码，在非交互环境里直接挂死。
+// 不能传 `-p ""` —— Windows shell 会吞掉空字符串参数，让 CLI 报「缺少值」；
+// 改用 CLI 支持的环境变量传空密码，同时关掉 stdin 兜底。
 const npx = process.platform === "win32" ? "npx.cmd" : "npx";
 execFileSync(npx, ["tauri", "signer", "sign", "-f", key, file], {
-  stdio: "inherit",
+  stdio: ["ignore", "inherit", "inherit"],
   shell: process.platform === "win32",
+  env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "" },
 });
 const signature = readFileSync(`${file}.sig`, "utf8").trim();
 

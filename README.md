@@ -261,6 +261,9 @@ npx tauri build
   本地用 `package.bat` 打包时设 `TAURI_SIGNING_PRIVATE_KEY_PATH` 指向私钥文件，才会生成 `.sig`。
 - 未配置密钥时 CI 自动把 `createUpdaterArtifacts` 关掉（仅在构建环境里），不影响普通安装包产出；
   签名改由本机 `scripts/make-update.mjs` 完成。
+- 私钥是 rsign 加密格式（密码为空）。非交互环境下 CLI 会一直等 tty 读密码而挂死，
+  所以脚本用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""` 环境变量传空密码并关闭 stdin；
+  不能写成 `-p ""`，Windows shell 会吞掉空参数导致 CLI 报「缺少值」。
 
 ### 发布一个新版
 
@@ -283,8 +286,9 @@ npx tauri build
 `UPDATE_SSH_PRIVATE_KEY` / `UPDATE_REMOTE_DIR`，CI 会用 scp 把安装包和清单推到网站静态目录；
 不配就跳过，从 Release 下载两个文件手动放即可。
 
-> 本机没有 Rust 工具链，`Cargo.toml` 新增的 `tauri-plugin-updater` 依赖条目会由 CI 首次构建时写进
-> `Cargo.lock`；拿到 CI 生成的 lock 后记得提交回来，保持三处一致。
+> 本机没有 Rust 工具链，`Cargo.toml` 新增 Rust 依赖后 `Cargo.lock` 只能由 CI 解析。
+> workflow 里的 `Sync Cargo.lock from CI build` 步骤会在 main 构建成功后自动把结果提交回仓库
+> （commit 带 `[skip ci]`，不会再次触发构建）。日常改依赖时无需手动处理。
 
 ---
 
