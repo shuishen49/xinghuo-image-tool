@@ -82,6 +82,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 只报告「配了哪些名字 / 是否非空 / 长度」，绝不打印任何值。
+      # 用 ::warning:: 输出成 annotations，公开 check-runs API 就能匿名读到。
+      # 查清配置问题后可以删掉这一步。
+      - name: Diagnose Actions config (names only)
+        shell: pwsh
+        env:
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          $names = @()
+          try {
+            $v = $env:VARS_JSON | ConvertFrom-Json
+            if ($v) { $names = @($v.PSObject.Properties.Name | Sort-Object) }
+          } catch { }
+          if ($names.Count -eq 0) {
+            Write-Host "::warning::Repo Variables names: (none)"
+          } else {
+            Write-Host "::warning::Repo Variables names: $($names -join ', ')"
+          }
+          foreach ($n in @('TAURI_SIGNING_PRIVATE_KEY', 'UPDATE_SSH_HOST', 'UPDATE_SSH_USER',
+                           'UPDATE_SSH_PORT', 'UPDATE_SSH_PRIVATE_KEY', 'UPDATE_REMOTE_DIR')) {
+            $val = [Environment]::GetEnvironmentVariable($n)
+            if ([string]::IsNullOrEmpty($val)) {
+              Write-Host "::warning::$n = EMPTY"
+            } else {
+              Write-Host "::warning::$n = SET (len=$($val.Length))"
+            }
+          }
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
