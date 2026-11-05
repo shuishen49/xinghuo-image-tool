@@ -199,6 +199,25 @@ jobs:
             out/*
           if-no-files-found: error
 
+      # 本机没有 Rust 工具链，新增 Rust 依赖后 Cargo.lock 只能由 CI 解析生成。
+      # 把解析结果回写到 main，避免每次构建都重新解析依赖树。
+      # commit message 带 [skip ci]，否则这次 push 会再次触发本 workflow 形成循环。
+      - name: Sync Cargo.lock from CI build
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/Cargo.lock
+          if git diff --cached --quiet; then
+            echo 'Cargo.lock 无变化'
+            exit 0
+          fi
+          git commit -m 'chore: sync Cargo.lock from CI build [skip ci]'
+          git push origin HEAD:main
+          echo '已回写 Cargo.lock'
+
       # 手动触发 + 勾选 publish 时，先补一个 v<版本> 标签（Release 必须挂在标签上）。
       - name: Ensure release tag exists
         if: github.event_name == 'workflow_dispatch' && inputs.publish
