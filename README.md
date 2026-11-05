@@ -259,13 +259,21 @@ npx tauri build
 - 公钥已写入 `tauri.conf.json`。**私钥丢了就无法再签发更新**，请自行备份（密码管理器 / 离线 U 盘）。
 - CI 需要把私钥内容配成仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`（这把密钥没有密码）。
   本地用 `package.bat` 打包时设 `TAURI_SIGNING_PRIVATE_KEY_PATH` 指向私钥文件，才会生成 `.sig`。
-- 未配置密钥时 CI 跳过 `latest.json` 生成，不影响普通安装包产出。
+- 未配置密钥时 CI 自动把 `createUpdaterArtifacts` 关掉（仅在构建环境里），不影响普通安装包产出；
+  签名改由本机 `scripts/make-update.mjs` 完成。
 
 ### 发布一个新版
 
 1. 三处版本号同步：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`。
 2. 提交后打 tag 推送（如 `git tag v0.1.2 && git push origin v0.1.2`），或在 Actions 手动触发并勾 `publish`。
-3. CI 产出：`XinghuoImageTool-<ver>-x64-setup.exe`、绿色版 exe / zip、`.sig` 签名、`latest.json`。
+3. CI 产出 `XinghuoImageTool-<ver>-x64-setup.exe`、绿色版 exe / zip 并发布到 Release。
+   - **配了 `TAURI_SIGNING_PRIVATE_KEY`**：CI 同时产出 `.sig` 和 `latest.json`，直接进第 4 步。
+   - **没配 Secret（当前状态）**：CI 自动关掉 updater 产物，只出普通安装包。从 Release 下载
+     setup.exe 后在本机执行下面这条，脚本会用私钥签名、并从 `tauri.conf.json` 读版本与 endpoint，
+     生成 `.sig` 和 `latest.json`：
+     ```bash
+     node scripts/make-update.mjs XinghuoImageTool-0.1.2-x64-setup.exe
+     ```
 4. 把 **setup 安装包 + latest.json** 上传到服务器
    `/opt/hot-update-server/public/linggan10s-image-tool/`（两个文件，路径要和清单里的 `url` 一致）。
    验收：清单返回 JSON、安装包可下载、`.sig` 与清单 `signature` 一致。
