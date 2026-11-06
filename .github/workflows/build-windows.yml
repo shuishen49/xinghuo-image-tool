@@ -272,8 +272,12 @@ jobs:
           set -euo pipefail
           port="${UPDATE_SSH_PORT:-22}"
           mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$UPDATE_SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          # GitHub Secret may receive CRLF when pasted from Windows. OpenSSH on
+          # the Linux runner rejects the resulting key as "invalid format", so
+          # normalize it to LF before use and validate it explicitly.
+          printf '%s\n' "$UPDATE_SSH_PRIVATE_KEY" | tr -d '\r' > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
+          ssh-keygen -y -f "$HOME/.ssh/deploy_key" >/dev/null
           ssh-keyscan -p "$port" -H "$UPDATE_SSH_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
           # 只传更新链路需要的三个文件。stage/*.exe 会把 portable 绿色版
           # 一起推到更新目录，既多余又容易让人工排查时搞混该验签哪个包。
